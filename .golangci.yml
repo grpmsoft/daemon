@@ -1,0 +1,37 @@
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  enable:
+    - govet
+    - staticcheck
+    - errcheck
+    - errorlint
+    - gosec
+    - ineffassign
+    - misspell
+    - unconvert
+    - unparam
+    - goconst
+    - gocritic
+    - gocyclo
+    - funlen
+    - revive
+
+  settings:
+    gocyclo:
+      min-complexity: 20
+    funlen:
+      lines: 120
+      statements: 60
+
+  exclusions:
+    rules:
+      # Exclude complexity checks for test files.
+      - path: _test\.go
+        linters:
+          - funlen
+          - gocyclo
+          - goconst
