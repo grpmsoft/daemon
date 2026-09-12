@@ -336,7 +336,7 @@ func TestDaemon_Start_ErrorCleansPIDLock(t *testing.T) {
 	// Startup lock file must NOT be held (deferred Unlock).
 	lockPath := filepath.Join(dataDir, "testapp.lock")
 	// If we can acquire it, it's not held.
-	f, lockErr := os.OpenFile(lockPath, os.O_RDONLY, 0)
+	f, lockErr := os.OpenFile(lockPath, os.O_RDONLY, 0) //nolint:gosec // test path from t.TempDir
 	if lockErr == nil {
 		_ = f.Close()
 	}
@@ -347,7 +347,7 @@ func TestDaemon_Start_ContextCancelled_ReturnsError(t *testing.T) {
 
 	// Hold the startup lock so LockCtx must wait and see ctx cancelled.
 	lockPath := filepath.Join(dataDir, "testapp.lock")
-	lockFile, lockErr := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	lockFile, lockErr := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600) //nolint:gosec // test path from t.TempDir
 	if lockErr != nil {
 		t.Fatalf("create lock file: %v", lockErr)
 	}
@@ -1104,5 +1104,40 @@ func TestDaemon_BuildInfo_ZeroStartTime_ZeroUptime(t *testing.T) {
 
 	if info.Uptime != 0 {
 		t.Errorf("zero StartTime must produce zero Uptime, got %v", info.Uptime)
+	}
+}
+
+func TestDaemon_Start_PathTraversal_RejectsInvalidName(t *testing.T) {
+	dataDir := t.TempDir()
+
+	tests := []struct {
+		name    string
+		cfgName string
+	}{
+		{"dotdot slash", "../../evil"},
+		{"backslash", `..\..\evil`},
+		{"slash in name", "sub/dir"},
+		{"dot", "."},
+		{"dotdot", ".."},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d := New(Config{Name: tt.cfgName, DataDir: dataDir, Binary: "/bin/true"})
+			_, err := d.Start(context.Background())
+			if err == nil {
+				t.Fatal("expected error for invalid Name")
+			}
+			if !errors.Is(err, ErrInvalidConfig) {
+				t.Errorf("expected ErrInvalidConfig, got: %v", err)
+			}
+		})
+	}
+
+	// Verify no files created outside dataDir.
+	entries, _ := os.ReadDir(dataDir)
+	for _, e := range entries {
+		if e.Name() == "evil" || strings.Contains(e.Name(), "evil") {
+			t.Errorf("path traversal created file: %s", e.Name())
+		}
 	}
 }

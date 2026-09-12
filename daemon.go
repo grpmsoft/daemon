@@ -87,6 +87,9 @@ func NewWithDeps(cfg Config, pids PIDStore, procs ProcessManager, health HealthC
 //   - Delegate to startLocked (acquire PID lock, spawn, health check)
 func (d *Daemon) Start(ctx context.Context) (*Info, error) {
 	d.cfg.applyDefaults()
+	if err := d.cfg.Validate(); err != nil {
+		return nil, err
+	}
 	startupFile, err := d.acquireStartupLock(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("start %s: %w", d.cfg.Name, err)
@@ -107,6 +110,9 @@ func (d *Daemon) Start(ctx context.Context) (*Info, error) {
 // on the startup lock.
 func (d *Daemon) EnsureRunning(ctx context.Context) (*Info, error) {
 	d.cfg.applyDefaults()
+	if err := d.cfg.Validate(); err != nil {
+		return nil, err
+	}
 	startupFile, err := d.acquireStartupLock(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("ensure running %s: %w", d.cfg.Name, err)
@@ -336,6 +342,9 @@ func readLogTail(logFile string, n int) string {
 // Idempotent: returns nil if the daemon is already stopped.
 func (d *Daemon) Stop(ctx context.Context) error {
 	d.cfg.applyDefaults()
+	if err := d.cfg.Validate(); err != nil {
+		return err
+	}
 	startupFile, err := d.acquireStartupLock(ctx)
 	if err != nil {
 		return fmt.Errorf("stop %s: %w", d.cfg.Name, err)
@@ -351,6 +360,9 @@ func (d *Daemon) Stop(ctx context.Context) error {
 // the startup lock independently).
 func (d *Daemon) Restart(ctx context.Context) (*Info, error) {
 	d.cfg.applyDefaults()
+	if err := d.cfg.Validate(); err != nil {
+		return nil, err
+	}
 	startupFile, err := d.acquireStartupLock(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("restart %s: %w", d.cfg.Name, err)
@@ -470,6 +482,9 @@ func (ct *ConnTracker) Active() int64 {
 // arriving during the wait resets the timer.
 func Serve(ctx context.Context, cfg Config, handler http.Handler) error {
 	cfg.applyDefaults()
+	if err := cfg.Validate(); err != nil {
+		return err
+	}
 
 	startTime := time.Now()
 	pidPath := filepath.Join(cfg.DataDir, cfg.Name+".pid")
