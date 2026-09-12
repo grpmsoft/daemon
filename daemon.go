@@ -55,10 +55,10 @@ type Daemon struct {
 }
 
 // New creates a Daemon with the given configuration and default implementations.
+// Config is normalized (defaults applied) at construction time and is immutable
+// after New returns. Concurrent method calls on the same *Daemon are safe.
 func New(cfg Config) *Daemon {
 	cfg.applyDefaults()
-	// Validate is intentionally not called here — New is used by tests
-	// with minimal configs. Validate is called by EnsureRunning and Serve.
 	return &Daemon{
 		cfg:    cfg,
 		pids:   newDefaultPIDStore(cfg.DataDir, cfg.Name),
@@ -88,7 +88,6 @@ func NewWithDeps(cfg Config, pids PIDStore, procs ProcessManager, health HealthC
 //   - Under startup lock, check if daemon already running (PID file held)
 //   - Delegate to startLocked (acquire PID lock, spawn, health check)
 func (d *Daemon) Start(ctx context.Context) (*Info, error) {
-	d.cfg.applyDefaults()
 	if err := d.cfg.Validate(); err != nil {
 		return nil, err
 	}
@@ -111,7 +110,6 @@ func (d *Daemon) Start(ctx context.Context) (*Info, error) {
 // info. If not, starts a new one. Safe for concurrent callers — all serialize
 // on the startup lock.
 func (d *Daemon) EnsureRunning(ctx context.Context) (*Info, error) {
-	d.cfg.applyDefaults()
 	if err := d.cfg.Validate(); err != nil {
 		return nil, err
 	}
@@ -348,7 +346,6 @@ func readLogTail(logFile string, n int) string {
 // Stop gracefully shuts down the daemon. Serialized on the startup lock.
 // Idempotent: returns nil if the daemon is already stopped.
 func (d *Daemon) Stop(ctx context.Context) error {
-	d.cfg.applyDefaults()
 	if err := d.cfg.Validate(); err != nil {
 		return err
 	}
@@ -366,7 +363,6 @@ func (d *Daemon) Stop(ctx context.Context) error {
 // occur if Restart called the public Stop() then Start() (each acquires
 // the startup lock independently).
 func (d *Daemon) Restart(ctx context.Context) (*Info, error) {
-	d.cfg.applyDefaults()
 	if err := d.cfg.Validate(); err != nil {
 		return nil, err
 	}

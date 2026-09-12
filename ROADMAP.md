@@ -3,7 +3,7 @@
 ## Current State: v0.3.3
 
 Cross-platform daemon lifecycle library with unified lock protocol,
-lease-based connection tracking (ADR-003), and control-plane bearer token.
+lease-based connection tracking, and control-plane bearer token.
 
 ### What works
 
