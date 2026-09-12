@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"errors"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -63,17 +64,18 @@ func TestConfig_ApplyDefaults_DoesNotOverrideNonZero(t *testing.T) {
 	}
 }
 
-// TestConfig_ApplyDefaults_NameAndDataDirUnchanged verifies that applyDefaults
-// never touches fields it does not own.
-func TestConfig_ApplyDefaults_NameAndDataDirUnchanged(t *testing.T) {
-	cfg := Config{Name: "myapp", DataDir: "/var/run/myapp"}
+// TestConfig_ApplyDefaults_NameUnchanged verifies that applyDefaults
+// never touches the Name field.
+func TestConfig_ApplyDefaults_NameUnchanged(t *testing.T) {
+	dir := t.TempDir()
+	cfg := Config{Name: "myapp", DataDir: dir}
 	cfg.applyDefaults()
 
 	if cfg.Name != "myapp" {
 		t.Errorf("got %v, want %v", cfg.Name, "myapp")
 	}
-	if cfg.DataDir != "/var/run/myapp" {
-		t.Errorf("got %v, want %v", cfg.DataDir, "/var/run/myapp")
+	if !filepath.IsAbs(cfg.DataDir) {
+		t.Errorf("DataDir must be absolute after applyDefaults, got %q", cfg.DataDir)
 	}
 }
 
@@ -104,6 +106,36 @@ func TestConfig_Validate(t *testing.T) {
 			}
 			if tt.wantErr && err != nil && !errors.Is(err, ErrInvalidConfig) {
 				t.Errorf("error must wrap ErrInvalidConfig, got %v", err)
+			}
+		})
+	}
+}
+
+func TestConfig_ApplyDefaults_DirAbsolute(t *testing.T) {
+	tests := []struct {
+		name    string
+		dataDir string
+		dir     string
+		wantAbs bool
+	}{
+		{"relative DataDir gets absolute Dir", ".gode", "", true},
+		{"absolute DataDir preserved", t.TempDir(), "", true},
+		{"explicit Dir made absolute", ".gode", ".custom", true},
+		{"explicit absolute Dir preserved", t.TempDir(), t.TempDir(), true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Config{Name: "test", DataDir: tt.dataDir, Dir: tt.dir}
+			cfg.applyDefaults()
+
+			if tt.wantAbs && !filepath.IsAbs(cfg.DataDir) {
+				t.Errorf("DataDir must be absolute after applyDefaults, got %q", cfg.DataDir)
+			}
+			if tt.wantAbs && !filepath.IsAbs(cfg.Dir) {
+				t.Errorf("Dir must be absolute after applyDefaults, got %q", cfg.Dir)
+			}
+			if tt.dir == "" && cfg.Dir != cfg.DataDir {
+				t.Errorf("empty Dir must default to DataDir, got Dir=%q DataDir=%q", cfg.Dir, cfg.DataDir)
 			}
 		})
 	}

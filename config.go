@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -68,6 +69,11 @@ type Config struct {
 	// before initiating a graceful shutdown. Zero means never auto-shutdown.
 	IdleTimeout time.Duration `json:"idleTimeout"`
 
+	// Dir is the working directory for the spawned daemon process.
+	// Empty means DataDir. Prevents the daemon from holding the parent's
+	// CWD (which may be deleted or unmounted after start).
+	Dir string `json:"dir"`
+
 	// RequireToken, when true, requires the bearer token for the application
 	// handler (everything outside /health and /daemon/*). Default false so
 	// curl debugging of the app handler keeps working. MCP deployments
@@ -95,6 +101,11 @@ func (c *Config) Validate() error {
 }
 
 func (c *Config) applyDefaults() {
+	if c.DataDir != "" {
+		if abs, err := filepath.Abs(c.DataDir); err == nil {
+			c.DataDir = abs
+		}
+	}
 	if c.Timeout == 0 {
 		c.Timeout = 30 * time.Second
 	}
@@ -104,6 +115,14 @@ func (c *Config) applyDefaults() {
 	if c.Binary == "" {
 		bin, _ := os.Executable()
 		c.Binary = bin
+	}
+	if c.Dir == "" {
+		c.Dir = c.DataDir
+	}
+	if c.Dir != "" {
+		if abs, err := filepath.Abs(c.Dir); err == nil {
+			c.Dir = abs
+		}
 	}
 }
 

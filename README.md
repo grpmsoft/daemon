@@ -160,6 +160,7 @@ Race-safe: if two agents call `EnsureRunning` simultaneously and one wins the st
 | `Timeout` | `time.Duration` | `30s` | How long `Start()` waits for health check to pass |
 | `HealthPath` | `string` | `"/health"` | HTTP path for the health endpoint |
 | `IdleTimeout` | `time.Duration` | `0` (disabled) | Auto-shutdown after this duration with zero connections |
+| `Dir` | `string` | `DataDir` | Working directory for spawned daemon. Prevents holding parent's CWD |
 | `RequireToken` | `bool` | `false` | When true, bearer token required for app handler too |
 
 **Note:** `DataDir` will contain a persistent `<Name>.lock` file used to serialize concurrent `EnsureRunning` calls. After a binary upgrade (`go install`), `EnsureRunning` returns the existing daemon's port -- call `Restart()` to pick up the new binary. Set `Binary` and `Args` in Config once; all lifecycle methods (`Start`, `Stop`, `Restart`, `EnsureRunning`) use them automatically.
