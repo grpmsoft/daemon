@@ -208,6 +208,20 @@ func TestIsHeld_TrueWhileLocked_FalseAfterRelease(t *testing.T) {
 	}
 }
 
+func TestIsHeld_NonExistentFile_DoesNotCreate(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "does-not-exist.pid")
+
+	if IsHeld(path) {
+		t.Fatal("IsHeld must be false for non-existent file")
+	}
+
+	// The file must NOT be created by the IsHeld probe.
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("IsHeld created a file that did not exist: %v", err)
+	}
+}
+
 func TestInheritFD_ReflockSameOFD(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("InheritFD uses flock; not supported on Windows")

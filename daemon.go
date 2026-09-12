@@ -231,7 +231,7 @@ func (d *Daemon) Stop(ctx context.Context) error {
 	}
 
 	// Fallback: force kill (SIGTERM→SIGKILL on Unix, TerminateProcess on Windows).
-	if err := d.procs.KillProcess(data.PID); err != nil {
+	if err := d.procs.KillProcess(ctx, data.PID, 5*time.Second); err != nil {
 		return fmt.Errorf("kill daemon %s (pid %d): %w", d.cfg.Name, data.PID, err)
 	}
 

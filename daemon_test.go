@@ -84,7 +84,7 @@ func (m *mockProcessManager) StartDetached(_ string, _ []string, _ string, _ []s
 	return m.startPID, nil
 }
 
-func (m *mockProcessManager) KillProcess(_ int) error {
+func (m *mockProcessManager) KillProcess(_ context.Context, _ int, _ time.Duration) error {
 	m.killCallCount++
 	return m.killErr
 }
@@ -129,8 +129,8 @@ func (h *hookProcessManager) StartDetached(binary string, args []string, logFile
 	return pid, err
 }
 
-func (h *hookProcessManager) KillProcess(pid int) error {
-	return h.inner.KillProcess(pid)
+func (h *hookProcessManager) KillProcess(ctx context.Context, pid int, grace time.Duration) error {
+	return h.inner.KillProcess(ctx, pid, grace)
 }
 
 func (h *hookProcessManager) IsProcessAlive(pid int) bool {

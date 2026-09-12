@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"time"
@@ -121,7 +122,7 @@ type PIDInfo struct {
 // ProcessManager abstracts platform-specific process lifecycle operations.
 type ProcessManager interface {
 	StartDetached(binary string, args []string, logFile string, env []string) (pid int, err error)
-	KillProcess(pid int) error
+	KillProcess(ctx context.Context, pid int, grace time.Duration) error
 	IsProcessAlive(pid int) bool
 }
 

@@ -3,11 +3,13 @@
 package internal
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"strconv"
 	"syscall"
+	"time"
 	"unsafe"
 )
 
@@ -57,7 +59,14 @@ func StartDetached(binary string, args []string, logFile string, env []string) (
 
 // KillProcess terminates a process by PID on Windows.
 // It first attempts TerminateProcess via syscall; on failure falls back to taskkill.
-func KillProcess(pid int) error {
+// Windows TerminateProcess is immediate (no grace period concept), so grace is
+// accepted for interface compliance but not used. ctx is respected for the
+// taskkill fallback to allow cancellation.
+// A zero grace duration defaults to 5 seconds for backward compatibility.
+func KillProcess(ctx context.Context, pid int, grace time.Duration) error {
+	// grace is accepted for interface compliance; Windows kill is immediate.
+	_ = grace
+
 	if pid <= 0 || pid > 0x7FFFFFFF {
 		return fmt.Errorf("invalid pid: %d", pid)
 	}
@@ -72,7 +81,7 @@ func KillProcess(pid int) error {
 	}
 
 	// Fallback: taskkill /F /PID <pid>
-	cmd := exec.Command("taskkill", "/F", "/PID", strconv.Itoa(pid)) //nolint:gosec // pid is a process ID, not user input
+	cmd := exec.CommandContext(ctx, "taskkill", "/F", "/PID", strconv.Itoa(pid)) //nolint:gosec // pid is a process ID, not user input
 	if killErr := cmd.Run(); killErr != nil {
 		return fmt.Errorf("kill process %d: syscall failed, taskkill failed: %w", pid, killErr)
 	}

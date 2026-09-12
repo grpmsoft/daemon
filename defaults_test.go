@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -236,7 +237,7 @@ func TestDefaultProcessManager_IsProcessAlive(t *testing.T) {
 func TestDefaultProcessManager_KillProcess_InvalidPID(_ *testing.T) {
 	pm := defaultProcessManager{}
 	// PID 999999 almost certainly does not exist.
-	err := pm.KillProcess(999999)
+	err := pm.KillProcess(context.Background(), 999999, 5*time.Second)
 	// The result is platform-specific: on Windows taskkill fails, on Unix FindProcess
 	// may or may not return an error depending on OS. We simply verify the call
 	// does not panic and returns a non-nil error for a non-existent PID on Windows.

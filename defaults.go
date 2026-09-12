@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"encoding/json/v2"
 	"fmt"
 	"net/http"
@@ -57,8 +58,8 @@ func (defaultProcessManager) StartDetached(binary string, args []string, logFile
 	return internal.StartDetached(binary, args, logFile, env)
 }
 
-func (defaultProcessManager) KillProcess(pid int) error {
-	return internal.KillProcess(pid)
+func (defaultProcessManager) KillProcess(ctx context.Context, pid int, grace time.Duration) error {
+	return internal.KillProcess(ctx, pid, grace)
 }
 
 func (defaultProcessManager) IsProcessAlive(pid int) bool {

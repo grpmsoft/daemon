@@ -3,6 +3,7 @@
 package internal
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -34,7 +35,7 @@ func TestStartDetached_SpawnsProcess(t *testing.T) {
 	}
 
 	// Kill it to avoid leaving a dangling process.
-	killErr := KillProcess(pid)
+	killErr := KillProcess(context.Background(), pid, 5*time.Second)
 	if killErr != nil {
 		t.Errorf("unexpected error: %v", killErr)
 	}
@@ -69,7 +70,7 @@ func TestStartDetached_CreatesLogFile(t *testing.T) {
 	}
 
 	// Clean up (process may have already exited).
-	_ = KillProcess(pid)
+	_ = KillProcess(context.Background(), pid, 5*time.Second)
 }
 
 // TestStartDetached_EmptyLogFile verifies StartDetached works without a log file.
@@ -82,7 +83,7 @@ func TestStartDetached_EmptyLogFile(t *testing.T) {
 		t.Errorf("StartDetached must return a positive PID, got %d", pid)
 	}
 
-	_ = KillProcess(pid)
+	_ = KillProcess(context.Background(), pid, 5*time.Second)
 }
 
 // TestStartDetached_InvalidBinary_ReturnsError verifies that a bad binary path
@@ -110,7 +111,7 @@ func TestKillProcess_AlreadyDead_NoError(t *testing.T) {
 	time.Sleep(300 * time.Millisecond)
 
 	// KillProcess on an already-dead process must not return an error.
-	killErr := KillProcess(pid)
+	killErr := KillProcess(context.Background(), pid, 5*time.Second)
 	// On Windows, killing a dead process may or may not error depending on handle state.
 	// We accept both outcomes; the important thing is it doesn't panic.
 	_ = killErr
