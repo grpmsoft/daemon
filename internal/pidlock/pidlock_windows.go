@@ -127,13 +127,28 @@ func ReadLocked(path string) ([]byte, error) {
 	return io.ReadAll(f)
 }
 
-// IsHeld attempts to open the file for writing. If the daemon holds it
-// without FILE_SHARE_WRITE, CreateFile returns ERROR_SHARING_VIOLATION.
+// IsHeld checks whether the PID file is currently held by a running daemon.
+// Opens with OPEN_EXISTING (not OPEN_ALWAYS) to avoid creating an empty file
+// when no daemon has ever run. If the daemon holds the file without
+// FILE_SHARE_WRITE, CreateFile returns ERROR_SHARING_VIOLATION.
 func IsHeld(path string) bool {
-	l, err := TryLock(path)
+	pathPtr, err := syscall.UTF16PtrFromString(path)
 	if err != nil {
-		return errors.Is(err, ErrLocked)
+		return false
 	}
-	l.Release()
+
+	h, err := syscall.CreateFile(
+		pathPtr,
+		syscall.GENERIC_READ|syscall.GENERIC_WRITE,
+		syscall.FILE_SHARE_READ,
+		nil,
+		syscall.OPEN_EXISTING, // do NOT create file if absent
+		syscall.FILE_ATTRIBUTE_NORMAL,
+		0,
+	)
+	if err != nil {
+		return errors.Is(err, errSharingViolation)
+	}
+	_ = syscall.CloseHandle(h)
 	return false
 }

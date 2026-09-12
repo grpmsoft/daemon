@@ -3,11 +3,15 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"encoding/json/v2"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -200,5 +204,75 @@ func TestProxy_LargeBody(t *testing.T) {
 	}
 	if !bytes.Contains(resp, []byte(`"size"`)) {
 		t.Errorf("response %q does not contain %q", resp, `"size"`)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Tests: Proxy — dead daemon and missing PID file
+// ---------------------------------------------------------------------------
+
+// TestProxy_DeadDaemon_ReturnsErrNotRunning verifies that Proxy returns
+// ErrNotRunning when a valid PID file exists but the lock is NOT held
+// (daemon crashed or was killed).
+func TestProxy_DeadDaemon_ReturnsErrNotRunning(t *testing.T) {
+	dir := t.TempDir()
+
+	// Write a valid PID file without holding the lock.
+	info := PIDInfo{
+		PID:       99999,
+		Port:      12345,
+		Name:      "test",
+		Binary:    "/usr/bin/test",
+		StartTime: time.Now(),
+	}
+	data, err := json.Marshal(info)
+	if err != nil {
+		t.Fatalf("marshal PIDInfo: %v", err)
+	}
+
+	pidPath := filepath.Join(dir, "test.pid")
+	if err := os.WriteFile(pidPath, data, 0o600); err != nil {
+		t.Fatalf("write pid file: %v", err)
+	}
+
+	cfg := Config{
+		Name:    "test",
+		DataDir: dir,
+	}
+	opts := ProxyOptions{
+		Stdin:  strings.NewReader(""),
+		Stdout: io.Discard,
+	}
+
+	err = Proxy(context.Background(), cfg, opts)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !errors.Is(err, ErrNotRunning) {
+		t.Errorf("expected ErrNotRunning, got: %v", err)
+	}
+}
+
+// TestProxy_NoPIDFile_ReturnsError verifies that Proxy returns an error
+// when no PID file exists at all.
+func TestProxy_NoPIDFile_ReturnsError(t *testing.T) {
+	dir := t.TempDir() // empty — no PID file
+
+	cfg := Config{
+		Name:    "nonexistent",
+		DataDir: dir,
+	}
+	opts := ProxyOptions{
+		Stdin:  strings.NewReader(""),
+		Stdout: io.Discard,
+	}
+
+	err := Proxy(context.Background(), cfg, opts)
+	if err == nil {
+		t.Fatal("expected error for missing PID file, got nil")
+	}
+	// Should NOT be ErrNotRunning — it's a different failure (can't read PID file).
+	if errors.Is(err, ErrNotRunning) {
+		t.Errorf("missing PID file should not return ErrNotRunning, got: %v", err)
 	}
 }

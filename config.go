@@ -1,7 +1,9 @@
 package daemon
 
 import (
+	"context"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 )
@@ -41,23 +43,30 @@ func (s Status) String() string {
 type Config struct {
 	// Name identifies the application (e.g. "gode", "goda").
 	// Used for PID file naming and health response.
-	Name string
+	Name string `json:"name"`
 
 	// DataDir is the directory for runtime files (PID, logs), relative to
 	// the workspace root. Example: ".gode".
-	DataDir string
+	DataDir string `json:"dataDir"`
+
+	// Binary is the executable path for the daemon process.
+	// Empty means os.Executable() (current binary).
+	Binary string `json:"binary"`
+
+	// Args are the arguments passed to the child process in Start/Restart.
+	Args []string `json:"args"`
 
 	// Timeout is how long Start() waits for the health check to pass.
 	// Zero means 30 seconds.
-	Timeout time.Duration
+	Timeout time.Duration `json:"timeout"`
 
 	// HealthPath is the HTTP path for the health endpoint.
 	// Zero value means "/health".
-	HealthPath string
+	HealthPath string `json:"healthPath"`
 
 	// IdleTimeout is how long the daemon waits with zero active connections
 	// before initiating a graceful shutdown. Zero means never auto-shutdown.
-	IdleTimeout time.Duration
+	IdleTimeout time.Duration `json:"idleTimeout"`
 }
 
 // Validate checks the configuration for invalid values.
@@ -85,6 +94,10 @@ func (c *Config) applyDefaults() {
 	}
 	if c.HealthPath == "" {
 		c.HealthPath = "/health"
+	}
+	if c.Binary == "" {
+		bin, _ := os.Executable()
+		c.Binary = bin
 	}
 }
 
@@ -121,7 +134,7 @@ type PIDInfo struct {
 // ProcessManager abstracts platform-specific process lifecycle operations.
 type ProcessManager interface {
 	StartDetached(binary string, args []string, logFile string, env []string) (pid int, err error)
-	KillProcess(pid int) error
+	KillProcess(ctx context.Context, pid int, grace time.Duration) error
 	IsProcessAlive(pid int) bool
 }
 

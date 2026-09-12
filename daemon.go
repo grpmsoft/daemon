@@ -2,17 +2,22 @@
 //
 // Two modes of operation:
 //
-//   - Client mode: Start/Stop/Restart/Status -- manage a background daemon process.
+//   - Client mode: Start/Stop/Restart/EnsureRunning/Status -- manage a background daemon process.
 //   - Server mode: Serve() -- run as the foreground daemon process with HTTP, PID management, signal handling.
+//
+// All lifecycle mutations (Start, Stop, Restart, EnsureRunning) serialize on a
+// single startup lock file. Public methods are thin wrappers: acquire lock,
+// check state, delegate to internal *Locked methods, release lock.
 //
 // Consumer wires CLI commands; this library provides the operations.
 //
 //	import "github.com/grpmsoft/daemon"
 //
-//	d := daemon.New(daemon.Config{Name: "myapp", DataDir: ".myapp"})
-//	d.Start(ctx, binary, args) // spawn detached background process
-//	d.Stop(ctx)                // graceful shutdown
-//	d.Status()                 // check if running, get info
+//	d := daemon.New(daemon.Config{Name: "myapp", DataDir: ".myapp", Args: []string{"serve"}})
+//	info, err := d.Start(ctx)         // spawn detached background process
+//	info, err = d.EnsureRunning(ctx)  // idempotent start-or-attach
+//	d.Stop(ctx)                       // graceful shutdown
+//	d.Status()                        // check if running, get info
 package daemon
 
 import (
@@ -28,10 +33,12 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
 
+	"github.com/grpmsoft/daemon/internal"
 	"github.com/grpmsoft/daemon/internal/pidlock"
 )
 
@@ -70,53 +77,175 @@ func NewWithDeps(cfg Config, pids PIDStore, procs ProcessManager, health HealthC
 	}
 }
 
-// Start spawns a detached background process running the given binary with args.
-// It waits for the health check to pass within Config.Timeout.
+// Start spawns a detached background process using Config.Binary and Config.Args.
+// Returns ErrAlreadyRunning if a daemon is already running.
 // The spawned process must eventually call Serve().
-func (d *Daemon) Start(ctx context.Context, binary string, args []string) error {
-	if d.IsRunning() {
-		info, _ := d.Status()
-		return fmt.Errorf("%w (pid %d, port %d)", ErrAlreadyRunning, info.PID, info.Port)
+//
+// Lock protocol:
+//   - Acquire startup lock (serializes concurrent Start/EnsureRunning/Stop/Restart)
+//   - Under startup lock, check if daemon already running (PID file held)
+//   - Delegate to startLocked (acquire PID lock, spawn, health check)
+func (d *Daemon) Start(ctx context.Context) (*Info, error) {
+	d.cfg.applyDefaults()
+	if err := d.cfg.Validate(); err != nil {
+		return nil, err
 	}
-
-	if err := os.MkdirAll(d.cfg.DataDir, 0o750); err != nil {
-		return fmt.Errorf("create data dir %s: %w", d.cfg.DataDir, err)
-	}
-
-	// Note: PID file is NOT cleared/deleted — it may be locked by the new
-	// inherited-lock mechanism. Stale data is handled by the lock protocol.
-
-	logFile := filepath.Join(d.cfg.DataDir, d.cfg.Name+".log")
-	env := []string{
-		"DAEMON_MODE=1",
-		fmt.Sprintf("DAEMON_DATA_DIR=%s", d.cfg.DataDir),
-	}
-
-	pid, err := d.procs.StartDetached(binary, args, logFile, env)
+	startupFile, err := d.acquireStartupLock(ctx)
 	if err != nil {
-		return fmt.Errorf("start daemon %s: %w", d.cfg.Name, err)
+		return nil, fmt.Errorf("start %s: %w", d.cfg.Name, err)
+	}
+	defer internal.Unlock(startupFile)
+
+	pidPath := d.pids.Path()
+	if pidlock.IsHeld(pidPath) {
+		data, _ := d.pids.Load()
+		return nil, fmt.Errorf("%w (pid %d, port %d)", ErrAlreadyRunning, data.PID, data.Port)
 	}
 
-	if err := d.waitForPIDFile(ctx, pid); err != nil {
-		return fmt.Errorf("daemon %s started (pid %d) but did not become ready: %w", d.cfg.Name, pid, err)
+	return d.startLocked(ctx)
+}
+
+// EnsureRunning is idempotent: if a daemon is already running, returns its
+// info. If not, starts a new one. Safe for concurrent callers — all serialize
+// on the startup lock.
+func (d *Daemon) EnsureRunning(ctx context.Context) (*Info, error) {
+	d.cfg.applyDefaults()
+	if err := d.cfg.Validate(); err != nil {
+		return nil, err
 	}
+	startupFile, err := d.acquireStartupLock(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("ensure running %s: %w", d.cfg.Name, err)
+	}
+	defer internal.Unlock(startupFile)
+
+	pidPath := d.pids.Path()
+	if pidlock.IsHeld(pidPath) {
+		// Daemon already running — wait for port and return existing info.
+		port, waitErr := waitForPort(ctx, pidPath, d.cfg.Timeout)
+		if waitErr != nil && pidlock.IsHeld(pidPath) {
+			return nil, waitErr
+		}
+		if waitErr == nil {
+			_ = port // port is available via pids.Load below
+			data, loadErr := d.pids.Load()
+			if loadErr != nil {
+				return nil, fmt.Errorf("ensure running %s: pid file unreadable: %w", d.cfg.Name, loadErr)
+			}
+			return d.buildInfo(data), nil
+		}
+		// Daemon died while waiting — fall through to start.
+	}
+
+	return d.startLocked(ctx)
+}
+
+// acquireStartupLock creates DataDir if needed and acquires the startup lock file.
+// All lifecycle mutations must hold this lock.
+func (d *Daemon) acquireStartupLock(ctx context.Context) (*os.File, error) {
+	if err := os.MkdirAll(d.cfg.DataDir, 0o750); err != nil {
+		return nil, fmt.Errorf("create data dir %s: %w", d.cfg.DataDir, err)
+	}
+	lockPath := filepath.Join(d.cfg.DataDir, d.cfg.Name+".lock")
+	return internal.LockCtx(ctx, lockPath)
+}
+
+// startLocked starts a new daemon process. Caller must hold the startup lock.
+func (d *Daemon) startLocked(ctx context.Context) (*Info, error) {
+	pidPath := d.pids.Path()
+
+	lock, tryErr := pidlock.TryLock(pidPath)
+	if tryErr != nil {
+		if errors.Is(tryErr, pidlock.ErrLocked) {
+			return nil, fmt.Errorf("%w: pid file locked", ErrAlreadyRunning)
+		}
+		return nil, fmt.Errorf("start %s: pid lock: %w", d.cfg.Name, tryErr)
+	}
+	// Truncate stale data so concurrent readers never see old port.
+	_ = lock.WriteData([]byte{})
+
+	_, startErr := d.startWithLock(ctx, lock)
+	if startErr != nil {
+		_ = lock.File().Close()
+		return nil, fmt.Errorf("start %s: %w", d.cfg.Name, startErr)
+	}
+
+	// Parent closes fd — child holds lock via inherited fd (Unix)
+	// or via own TryLock (Windows, after setupExtraFiles released parent's).
+	_ = lock.File().Close()
 
 	data, loadErr := d.pids.Load()
 	if loadErr != nil {
-		return fmt.Errorf("daemon %s started but pid file unreadable: %w", d.cfg.Name, loadErr)
+		return nil, fmt.Errorf("start %s: pid file unreadable after start: %w", d.cfg.Name, loadErr)
 	}
 
-	if err := d.health.WaitUntilReady(data.Port, d.cfg.HealthPath, d.cfg.Timeout); err != nil {
-		return fmt.Errorf("daemon %s health check failed: %w", d.cfg.Name, err)
+	return d.buildInfo(data), nil
+}
+
+// stopLocked stops the daemon. Caller must hold the startup lock.
+func (d *Daemon) stopLocked(ctx context.Context) error {
+	data, err := d.pids.Load()
+	if err != nil {
+		return nil
+	}
+
+	if !d.pids.IsAlive() {
+		return nil
+	}
+
+	// Try graceful shutdown via HTTP first.
+	if data.Port > 0 {
+		shutdownURL := fmt.Sprintf("http://127.0.0.1:%d/daemon/shutdown", data.Port)
+		reqCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		req, reqErr := http.NewRequestWithContext(reqCtx, http.MethodPost, shutdownURL, nil)
+		if reqErr == nil {
+			client := &http.Client{}
+			resp, doErr := client.Do(req)
+			cancel()
+			if doErr == nil {
+				_ = resp.Body.Close()
+				if waitErr := waitForLockRelease(ctx, d.pids, 10*time.Second); waitErr == nil {
+					return nil
+				} else if ctx.Err() != nil {
+					return ctx.Err()
+				}
+			} else if ctx.Err() != nil {
+				return ctx.Err()
+			}
+		} else {
+			cancel()
+		}
+	}
+
+	// Fallback: force kill.
+	if err := d.procs.KillProcess(ctx, data.PID, 5*time.Second); err != nil {
+		return fmt.Errorf("kill daemon %s (pid %d): %w", d.cfg.Name, data.PID, err)
 	}
 
 	return nil
 }
 
+// buildInfo creates an Info snapshot from PIDInfo.
+func (d *Daemon) buildInfo(data PIDInfo) *Info {
+	var uptime time.Duration
+	if !data.StartTime.IsZero() {
+		uptime = time.Since(data.StartTime).Truncate(time.Second)
+	}
+	return &Info{
+		Status:    StatusRunning,
+		PID:       data.PID,
+		Port:      data.Port,
+		Name:      d.cfg.Name,
+		StartTime: data.StartTime,
+		Uptime:    uptime,
+	}
+}
+
 // startWithLock starts a daemon child process with the locked PID file fd
 // passed via ExtraFiles. The child inherits the lock — no window where the
 // lock is released. Returns the port the daemon is listening on.
-func (d *Daemon) startWithLock(ctx context.Context, binary string, args []string, lock *pidlock.Lock) (int, error) {
+// Uses d.cfg.Binary and d.cfg.Args for the command.
+func (d *Daemon) startWithLock(ctx context.Context, lock *pidlock.Lock) (int, error) {
 	if err := os.MkdirAll(d.cfg.DataDir, 0o750); err != nil {
 		return 0, fmt.Errorf("create data dir %s: %w", d.cfg.DataDir, err)
 	}
@@ -133,7 +262,7 @@ func (d *Daemon) startWithLock(ctx context.Context, binary string, args []string
 		defer func() { _ = logF.Close() }()
 	}
 
-	cmd := exec.Command(binary, args...) //nolint:gosec // binary from trusted caller
+	cmd := exec.Command(d.cfg.Binary, d.cfg.Args...) //nolint:gosec // binary from trusted caller
 	cmd.Stdout = logF
 	cmd.Stderr = logF
 	cmd.SysProcAttr = detachedProcAttr()
@@ -152,16 +281,19 @@ func (d *Daemon) startWithLock(ctx context.Context, binary string, args []string
 	go func() { _ = cmd.Wait() }()
 
 	if err := d.waitForPIDFile(ctx, pid); err != nil {
-		return 0, fmt.Errorf("daemon %s started (pid %d) but did not become ready: %w", d.cfg.Name, pid, err)
+		_ = d.procs.KillProcess(ctx, pid, 5*time.Second)
+		return 0, fmt.Errorf("daemon %s (pid %d) did not become ready, killed: %w", d.cfg.Name, pid, err)
 	}
 
 	data, loadErr := d.pids.Load()
 	if loadErr != nil {
-		return 0, fmt.Errorf("daemon %s started but pid file unreadable: %w", d.cfg.Name, loadErr)
+		_ = d.procs.KillProcess(ctx, pid, 5*time.Second)
+		return 0, fmt.Errorf("daemon %s (pid %d) started but pid file unreadable, killed: %w", d.cfg.Name, pid, loadErr)
 	}
 
 	if err := d.health.WaitUntilReady(data.Port, d.cfg.HealthPath, d.cfg.Timeout); err != nil {
-		return 0, fmt.Errorf("daemon %s health check failed: %w", d.cfg.Name, err)
+		_ = d.procs.KillProcess(ctx, pid, 5*time.Second)
+		return 0, fmt.Errorf("daemon %s (pid %d) health check failed, killed: %w", d.cfg.Name, pid, err)
 	}
 
 	return data.Port, nil
@@ -189,59 +321,56 @@ func (d *Daemon) waitForPIDFile(ctx context.Context, expectedPID int) error {
 	}
 }
 
-// Stop reads the PID file, verifies the process identity (PID + binary path),
-// kills the daemon process, and clears the PID file. If the PID has been
-// recycled to a different process, the stale PID file is cleared without killing.
-func (d *Daemon) Stop(ctx context.Context) error {
-	data, err := d.pids.Load()
-	if err != nil {
-		return nil
+// readLogTail returns the last n lines from the log file for diagnostic messages.
+// Returns "" if the file does not exist, is empty, or cannot be read.
+func readLogTail(logFile string, n int) string {
+	if logFile == "" || n <= 0 {
+		return ""
 	}
-
-	if !d.pids.IsAlive() {
-		return nil
+	data, err := os.ReadFile(logFile) //nolint:gosec // trusted path from DataDir
+	if err != nil || len(data) == 0 {
+		return ""
 	}
-
-	// Try graceful shutdown via HTTP first (works on all platforms,
-	// allows deferred cleanup to run, children like gopls to exit cleanly).
-	if data.Port > 0 {
-		shutdownURL := fmt.Sprintf("http://127.0.0.1:%d/daemon/shutdown", data.Port)
-		reqCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		req, reqErr := http.NewRequestWithContext(reqCtx, http.MethodPost, shutdownURL, nil)
-		if reqErr == nil {
-			client := &http.Client{}
-			resp, doErr := client.Do(req)
-			cancel()
-			if doErr == nil {
-				_ = resp.Body.Close()
-				// Wait for lock release (daemon exiting). Respects ctx.
-				if waitErr := waitForLockRelease(ctx, d.pids, 10*time.Second); waitErr == nil {
-					return nil
-				} else if ctx.Err() != nil {
-					return ctx.Err()
-				}
-				// Graceful timeout expired — fall through to kill.
-			} else if ctx.Err() != nil {
-				// ctx cancelled — don't escalate to kill, just return.
-				return ctx.Err()
-			}
-		} else {
-			cancel()
-		}
+	lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+	if len(lines) > n {
+		lines = lines[len(lines)-n:]
 	}
-
-	// Fallback: force kill (SIGTERM→SIGKILL on Unix, TerminateProcess on Windows).
-	if err := d.procs.KillProcess(data.PID); err != nil {
-		return fmt.Errorf("kill daemon %s (pid %d): %w", d.cfg.Name, data.PID, err)
-	}
-
-	return nil
+	return strings.Join(lines, "\n")
 }
 
-// Restart stops a running daemon (if any) and starts a new one.
-func (d *Daemon) Restart(ctx context.Context, binary string, args []string) error {
-	_ = d.Stop(ctx)
-	return d.Start(ctx, binary, args)
+// Stop gracefully shuts down the daemon. Serialized on the startup lock.
+// Idempotent: returns nil if the daemon is already stopped.
+func (d *Daemon) Stop(ctx context.Context) error {
+	d.cfg.applyDefaults()
+	if err := d.cfg.Validate(); err != nil {
+		return err
+	}
+	startupFile, err := d.acquireStartupLock(ctx)
+	if err != nil {
+		return fmt.Errorf("stop %s: %w", d.cfg.Name, err)
+	}
+	defer internal.Unlock(startupFile)
+
+	return d.stopLocked(ctx)
+}
+
+// Restart stops a running daemon (if any) and starts a new one, under a
+// single startup lock acquisition. This prevents the deadlock that would
+// occur if Restart called the public Stop() then Start() (each acquires
+// the startup lock independently).
+func (d *Daemon) Restart(ctx context.Context) (*Info, error) {
+	d.cfg.applyDefaults()
+	if err := d.cfg.Validate(); err != nil {
+		return nil, err
+	}
+	startupFile, err := d.acquireStartupLock(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("restart %s: %w", d.cfg.Name, err)
+	}
+	defer internal.Unlock(startupFile)
+
+	_ = d.stopLocked(ctx)
+	return d.startLocked(ctx)
 }
 
 // Status reads the PID file and checks the process state.
@@ -353,6 +482,9 @@ func (ct *ConnTracker) Active() int64 {
 // arriving during the wait resets the timer.
 func Serve(ctx context.Context, cfg Config, handler http.Handler) error {
 	cfg.applyDefaults()
+	if err := cfg.Validate(); err != nil {
+		return err
+	}
 
 	startTime := time.Now()
 	pidPath := filepath.Join(cfg.DataDir, cfg.Name+".pid")

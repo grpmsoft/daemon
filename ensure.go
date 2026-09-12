@@ -3,83 +3,22 @@ package daemon
 import (
 	"context"
 	"encoding/json/v2"
-	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"time"
 
-	"github.com/grpmsoft/daemon/internal"
 	"github.com/grpmsoft/daemon/internal/pidlock"
 )
 
-// EnsureRunning checks if a daemon is already running for this config.
-// If running, it returns the existing port. If not, it starts a new daemon
-// using the provided binary and args, then waits for health check to pass.
-//
-// Protocol: two locks, two purposes, one ordering.
-//   - Startup lock (<name>.lock): serializes starters. Held during spawn→ready.
-//     Kernel releases on holder death → next waiter becomes starter automatically (N12).
-//   - PID file lock (<name>.pid): liveness signal. Held by running daemon for lifetime.
-//     Under startup lock, "PID held" means exactly "daemon alive" (no race with spawning).
-func EnsureRunning(ctx context.Context, cfg Config, binary string, args []string) (int, error) {
-	cfg.applyDefaults()
-
-	if err := os.MkdirAll(cfg.DataDir, 0o750); err != nil {
-		return 0, fmt.Errorf("ensure running: create data dir: %w", err)
-	}
-
-	// Step 1: Acquire startup lock (flock/LockFileEx on .lock file).
-	// Serializes all starters. If previous holder died, kernel released the lock
-	// and we become the starter (N12 solved automatically).
-	lockPath := filepath.Join(cfg.DataDir, cfg.Name+".lock")
-	startupFile, err := internal.LockCtx(ctx, lockPath)
-	if err != nil {
-		return 0, fmt.Errorf("ensure running: startup lock: %w", err)
-	}
-	defer internal.Unlock(startupFile)
-
-	pidPath := filepath.Join(cfg.DataDir, cfg.Name+".pid")
-
-	// Step 2: Under startup lock, check if daemon is alive (PID file held).
-	// "Held" under startup lock = daemon running (no race with another spawner).
-	if pidlock.IsHeld(pidPath) {
-		port, waitErr := waitForPort(ctx, pidPath, cfg.Timeout)
-		if waitErr != nil && pidlock.IsHeld(pidPath) {
-			return 0, waitErr
-		}
-		if waitErr == nil {
-			return port, nil
-		}
-		// Daemon died while we waited (lock freed). Fall through to Step 3.
-	}
-
-	// Step 3: PID file not held — no daemon running. Start one.
-	lock, tryErr := pidlock.TryLock(pidPath)
-	if tryErr != nil {
-		// Shouldn't happen under startup lock, but handle gracefully.
-		if errors.Is(tryErr, pidlock.ErrLocked) {
-			return waitForPort(ctx, pidPath, cfg.Timeout)
-		}
-		return 0, fmt.Errorf("ensure running: %w", tryErr)
-	}
-
-	// Truncate stale data so concurrent readers never see old port.
-	_ = lock.WriteData([]byte{})
-
+// EnsureRunning is a convenience package-level wrapper that creates a Daemon
+// from cfg and calls its EnsureRunning method. Returns the port the daemon is
+// listening on.
+func EnsureRunning(ctx context.Context, cfg Config) (int, error) {
 	d := New(cfg)
-
-	port, startErr := d.startWithLock(ctx, binary, args, lock)
-	if startErr != nil {
-		_ = lock.File().Close()
-		return 0, fmt.Errorf("ensure running: start daemon: %w", startErr)
+	info, err := d.EnsureRunning(ctx)
+	if err != nil {
+		return 0, err
 	}
-
-	// Parent closes its fd — child holds lock via inherited fd (Unix)
-	// or via own TryLock (Windows, after setupExtraFiles released parent's).
-	_ = lock.File().Close()
-
-	return port, nil
+	return info.Port, nil
 }
 
 // waitForPort polls the PID file until it contains a valid port or ctx expires.

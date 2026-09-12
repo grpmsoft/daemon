@@ -1,28 +1,29 @@
 # Roadmap
 
-## Current State: v0.2.0
+## Current State: v0.3.0
 
-Cross-platform daemon lifecycle library with lock-based process identity.
-PID file IS the lock — correct by construction on all platforms.
+Cross-platform daemon lifecycle library with unified lock protocol (ADR-002).
+All lifecycle mutations serialize on startup lock. One internal path, two public semantics.
 
 ### What works
 
-- Client mode: Start/Stop/Restart/Status with lock-based identity
+- Client mode: Start/Stop/Restart/Status — all serialized on startup lock
 - Server mode: Serve with auto port, inherited-lock PID file, health endpoint
-- Proxy mode: stdin/stdout ↔ HTTP bridge with testable io.Reader/Writer
-- EnsureRunning: start-if-needed with flock serialization (no duplicate daemons)
+- Proxy mode: stdin/stdout ↔ HTTP bridge with IsHeld pre-check
+- EnsureRunning: method on *Daemon + package-level wrapper, fully testable
+- Binary/Args in Config — daemon identity per-config, not per-call
+- All mutating methods return *Info (pid, port, start time)
 - Graceful stop: HTTP /daemon/shutdown → clean exit on all platforms
 - Connection tracking with idle auto-shutdown
+- Orphan child killed on start failure
 - Cross-platform: Windows (share-mode), Linux/macOS (flock), BSD (flock)
-- Sentinel errors for programmatic error handling
+- CI: Node 24 actions, Dependabot, pinned golangci-lint
 
-## v0.3.0 — API Maturity
+## v0.4.0 — Hardening
 
 - [ ] Token auth for `/daemon/*` endpoints (nonce in PID file, `Authorization: Bearer`)
 - [ ] Lease-based connection tracking (crash-safe, replaces counting)
 - [ ] `slog.Logger` in Config (replace `fmt.Fprintf(os.Stderr)`)
-- [ ] `EnsureRunning` as `(*Daemon)` method (uses injected deps, fully testable)
-- [ ] `Status()` returns `Info` by value (never errors)
 - [ ] Pipe handshake parent→child (JSON, replaces env vars)
 - [ ] Upgrade detection: binary version in PID file, auto-restart on change
 

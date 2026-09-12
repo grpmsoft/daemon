@@ -3,6 +3,7 @@
 package internal
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -48,9 +49,14 @@ func StartDetached(binary string, args []string, logFile string, env []string) (
 	return pid, nil
 }
 
-// KillProcess sends SIGTERM and waits up to 5 seconds for the process to exit.
-// If the process does not exit in time, SIGKILL is sent.
-func KillProcess(pid int) error {
+// KillProcess sends SIGTERM and waits up to grace for the process to exit.
+// If the process does not exit in time, or ctx is cancelled, SIGKILL is sent.
+// A zero grace duration defaults to 5 seconds for backward compatibility.
+func KillProcess(ctx context.Context, pid int, grace time.Duration) error {
+	if grace == 0 {
+		grace = 5 * time.Second
+	}
+
 	process, err := os.FindProcess(pid)
 	if err != nil {
 		return fmt.Errorf("find process %d: %w", pid, err)
@@ -65,23 +71,33 @@ func KillProcess(pid int) error {
 		return fmt.Errorf("send SIGTERM to %d: %w", pid, err)
 	}
 
-	// Wait up to 5 seconds for exit.
-	deadline := time.Now().Add(5 * time.Second)
+	// Wait up to grace for exit, respecting ctx cancellation.
+	deadline := time.Now().Add(grace)
 	for time.Now().Before(deadline) {
 		if !IsProcessAlive(pid) {
 			return nil
 		}
+		select {
+		case <-ctx.Done():
+			// Context cancelled — escalate to SIGKILL immediately.
+			return forceKill(process, pid)
+		default:
+		}
 		time.Sleep(200 * time.Millisecond)
 	}
 
-	// Force: SIGKILL
+	// Grace period expired: force kill.
+	return forceKill(process, pid)
+}
+
+// forceKill sends SIGKILL to a process. Returns nil if the process is already dead.
+func forceKill(process *os.Process, pid int) error {
 	if err := process.Signal(syscall.SIGKILL); err != nil {
 		if !IsProcessAlive(pid) {
 			return nil
 		}
 		return fmt.Errorf("send SIGKILL to %d: %w", pid, err)
 	}
-
 	return nil
 }
 

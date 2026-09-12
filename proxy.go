@@ -58,9 +58,15 @@ func Proxy(ctx context.Context, cfg Config, opts ProxyOptions) error {
 	cfg.applyDefaults()
 	opts.applyDefaults()
 
-	port, err := readPort(filepath.Join(cfg.DataDir, cfg.Name+".pid"))
+	pidPath := filepath.Join(cfg.DataDir, cfg.Name+".pid")
+
+	port, err := readPort(pidPath)
 	if err != nil {
 		return fmt.Errorf("proxy: %w", err)
+	}
+
+	if !pidlock.IsHeld(pidPath) {
+		return fmt.Errorf("proxy: %w", ErrNotRunning)
 	}
 
 	baseURL := fmt.Sprintf("http://127.0.0.1:%d%s", port, opts.MCPPath)
