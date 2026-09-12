@@ -33,7 +33,7 @@ func EnsureRunning(ctx context.Context, cfg Config, binary string, args []string
 	// Serializes all starters. If previous holder died, kernel released the lock
 	// and we become the starter (N12 solved automatically).
 	lockPath := filepath.Join(cfg.DataDir, cfg.Name+".lock")
-	startupFile, err := internal.Lock(lockPath)
+	startupFile, err := internal.LockCtx(ctx, lockPath)
 	if err != nil {
 		return 0, fmt.Errorf("ensure running: startup lock: %w", err)
 	}
