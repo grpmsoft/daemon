@@ -43,13 +43,15 @@ func TestHelperProcess(t *testing.T) {
 	os.Exit(0)
 }
 
-func helperBinary() (string, []string) {
-	return os.Args[0], []string{"-test.run=^TestHelperProcess$", "-test.timeout=5m"}
-}
-
 func itConfig(t *testing.T) daemon.Config {
 	t.Helper()
-	cfg := daemon.Config{Name: itName, DataDir: t.TempDir(), Timeout: 15 * time.Second}
+	cfg := daemon.Config{
+		Name:    itName,
+		DataDir: t.TempDir(),
+		Binary:  os.Args[0],
+		Args:    []string{"-test.run=^TestHelperProcess$", "-test.timeout=5m"},
+		Timeout: 15 * time.Second,
+	}
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
@@ -59,7 +61,7 @@ func itConfig(t *testing.T) daemon.Config {
 }
 
 func dial(port int) error {
-	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/health", port))
+	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/health", port)) //nolint:noctx,gosec // test-only
 	if err != nil {
 		return err
 	}
@@ -68,13 +70,12 @@ func dial(port int) error {
 
 func TestIntegration_ConcurrentEnsureRunning(t *testing.T) {
 	cfg := itConfig(t)
-	bin, args := helperBinary()
 	const n = 4
 	ports := make([]int, n)
 	errs := make([]error, n)
 	var wg sync.WaitGroup
 	for i := range n {
-		wg.Go(func() { ports[i], errs[i] = daemon.EnsureRunning(context.Background(), cfg, bin, args) })
+		wg.Go(func() { ports[i], errs[i] = daemon.EnsureRunning(context.Background(), cfg) })
 	}
 	wg.Wait()
 	for i := range n {
@@ -92,12 +93,13 @@ func TestIntegration_ConcurrentEnsureRunning(t *testing.T) {
 
 func TestIntegration_StopHonoursDeadline(t *testing.T) {
 	cfg := itConfig(t)
-	bin, args := helperBinary()
-	port, err := daemon.EnsureRunning(context.Background(), cfg, bin, args)
+	port, err := daemon.EnsureRunning(context.Background(), cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	go func() { _, _ = http.Get(fmt.Sprintf("http://127.0.0.1:%d/slow", port)) }()
+	go func() {
+		_, _ = http.Get(fmt.Sprintf("http://127.0.0.1:%d/slow", port)) //nolint:noctx,gosec // test-only
+	}()
 	time.Sleep(200 * time.Millisecond)
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -122,8 +124,7 @@ func TestIntegration_StopHonoursDeadline(t *testing.T) {
 
 func TestIntegration_StopIdempotentAndStatus(t *testing.T) {
 	cfg := itConfig(t)
-	bin, args := helperBinary()
-	if _, err := daemon.EnsureRunning(context.Background(), cfg, bin, args); err != nil {
+	if _, err := daemon.EnsureRunning(context.Background(), cfg); err != nil {
 		t.Fatal(err)
 	}
 	d := daemon.New(cfg)
@@ -141,8 +142,7 @@ func TestIntegration_StopIdempotentAndStatus(t *testing.T) {
 func TestIntegration_IdleShutdownWithoutClients(t *testing.T) {
 	cfg := itConfig(t)
 	t.Setenv("IT_IDLE", "500ms")
-	bin, args := helperBinary()
-	if _, err := daemon.EnsureRunning(context.Background(), cfg, bin, args); err != nil {
+	if _, err := daemon.EnsureRunning(context.Background(), cfg); err != nil {
 		t.Fatal(err)
 	}
 	deadline := time.Now().Add(5 * time.Second)
@@ -158,7 +158,6 @@ func TestIntegration_IdleShutdownWithoutClients(t *testing.T) {
 // A waiting EnsureRunning must become the starter once the lock is free.
 func TestIntegration_HolderDiesMidSpawn(t *testing.T) {
 	cfg := itConfig(t)
-	bin, args := helperBinary()
 	pidPath := filepath.Join(cfg.DataDir, itName+".pid")
 	holder, err := pidlock.TryLock(pidPath)
 	if err != nil {
@@ -167,7 +166,7 @@ func TestIntegration_HolderDiesMidSpawn(t *testing.T) {
 	_ = holder.WriteData(nil)
 	go func() { time.Sleep(1500 * time.Millisecond); holder.Release() }() // "crash"
 
-	port, err := daemon.EnsureRunning(context.Background(), cfg, bin, args)
+	port, err := daemon.EnsureRunning(context.Background(), cfg)
 	if err != nil {
 		t.Fatalf("EnsureRunning after holder death: %v (want: become the starter)", err)
 	}

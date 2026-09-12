@@ -19,7 +19,7 @@ import (
 // returns the port from the PID file when the lock is held (daemon alive).
 func TestEnsureRunning_AlreadyRunning_ReturnsFastPath(t *testing.T) {
 	dir := t.TempDir()
-	cfg := Config{Name: "testapp", DataDir: dir}
+	cfg := Config{Name: "testapp", DataDir: dir, Binary: "/usr/bin/app"}
 	pidPath := filepath.Join(dir, "testapp.pid")
 
 	// Acquire lock and write PID data — simulates a running daemon.
@@ -35,7 +35,7 @@ func TestEnsureRunning_AlreadyRunning_ReturnsFastPath(t *testing.T) {
 		t.Fatalf("WriteData: %v", err)
 	}
 
-	port, ensureErr := EnsureRunning(context.Background(), cfg, "/usr/bin/app", nil)
+	port, ensureErr := EnsureRunning(context.Background(), cfg)
 	if ensureErr != nil {
 		t.Fatalf("unexpected error: %v", ensureErr)
 	}
@@ -51,12 +51,13 @@ func TestEnsureRunning_NotRunning_StartFails_ReturnsError(t *testing.T) {
 	cfg := Config{
 		Name:       "testapp",
 		DataDir:    dir,
+		Binary:     "/no/such/binary/that/does/not/exist",
 		Timeout:    200 * time.Millisecond,
 		HealthPath: "/health",
 	}
 
-	// No PID file → IsRunning false → slow path → Start("/no/such/binary") → error.
-	port, err := EnsureRunning(context.Background(), cfg, "/no/such/binary/that/does/not/exist", nil)
+	// No PID file -> IsRunning false -> slow path -> Start -> error.
+	port, err := EnsureRunning(context.Background(), cfg)
 
 	if err == nil {
 		t.Fatal("expected error, got nil")
@@ -64,8 +65,9 @@ func TestEnsureRunning_NotRunning_StartFails_ReturnsError(t *testing.T) {
 	if port != 0 {
 		t.Errorf("got %v, want %v", port, 0)
 	}
-	if !strings.Contains(err.Error(), "ensure running") {
-		t.Errorf("%q does not contain %q", err.Error(), "ensure running")
+	// Error should indicate a start failure.
+	if !strings.Contains(err.Error(), "start") {
+		t.Errorf("%q does not contain %q", err.Error(), "start")
 	}
 }
 
@@ -76,6 +78,7 @@ func TestEnsureRunning_StalePIDFile_StartFails_ReturnsError(t *testing.T) {
 	cfg := Config{
 		Name:       "testapp",
 		DataDir:    dir,
+		Binary:     "/no/such/binary/x",
 		Timeout:    200 * time.Millisecond,
 		HealthPath: "/health",
 	}
@@ -87,8 +90,8 @@ func TestEnsureRunning_StalePIDFile_StartFails_ReturnsError(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// IsRunning → false (dead PID) → slow path → Start → fails.
-	port, err := EnsureRunning(context.Background(), cfg, "/no/such/binary/x", nil)
+	// IsRunning -> false (dead PID) -> slow path -> Start -> fails.
+	port, err := EnsureRunning(context.Background(), cfg)
 
 	if err == nil {
 		t.Fatal("expected error, got nil")
@@ -105,6 +108,7 @@ func TestEnsureRunning_ContextCancelled_ReturnsZeroPort(t *testing.T) {
 	cfg := Config{
 		Name:       "testapp",
 		DataDir:    dir,
+		Binary:     "/no/such/binary/x",
 		Timeout:    5 * time.Second,
 		HealthPath: "/health",
 	}
@@ -112,7 +116,7 @@ func TestEnsureRunning_ContextCancelled_ReturnsZeroPort(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // pre-cancel
 
-	port, err := EnsureRunning(ctx, cfg, "/no/such/binary/x", nil)
+	port, err := EnsureRunning(ctx, cfg)
 
 	// Either a StartDetached error or context-cancelled error — both yield port=0.
 	_ = err

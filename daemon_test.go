@@ -32,6 +32,7 @@ type pidStoreMock struct {
 	clearErr       error
 	saveCallCount  int
 	clearCallCount int
+	pathResult     string
 }
 
 func (m *pidStoreMock) Save(pid, port int, name, binary string, startTime time.Time) error {
@@ -66,7 +67,12 @@ func (m *pidStoreMock) IsAlive() bool {
 	return m.aliveResult
 }
 
-func (m *pidStoreMock) Path() string { return "/mock/app.pid" }
+func (m *pidStoreMock) Path() string {
+	if m.pathResult != "" {
+		return m.pathResult
+	}
+	return "/mock/app.pid"
+}
 
 var _ PIDStore = (*pidStoreMock)(nil)
 
@@ -199,15 +205,17 @@ func TestDaemon_Start_AlreadyRunning_ReturnsError(t *testing.T) {
 	pids := &pidStoreMock{
 		aliveResult: true,
 		saved:       &PIDInfo{PID: 42, Port: 8080, Name: "testapp"},
+		pathResult:  pidPath,
 	}
 	d := NewWithDeps(Config{
 		Name:       "testapp",
 		DataDir:    dataDir,
+		Binary:     "/usr/bin/app",
 		Timeout:    500 * time.Millisecond,
 		HealthPath: "/health",
 	}, pids, &mockProcessManager{}, &mockHealthChecker{})
 
-	startErr := d.Start(context.Background(), "/usr/bin/app", nil)
+	_, startErr := d.Start(context.Background())
 
 	if startErr == nil {
 		t.Fatal("expected error, got nil")
@@ -226,13 +234,14 @@ func TestDaemon_Start_AlreadyRunning_ReturnsError(t *testing.T) {
 func TestDaemon_Start_LockProtocol_AcquiresStartupLock(t *testing.T) {
 	dataDir := t.TempDir()
 
-	pids := &pidStoreMock{}
+	pids := &pidStoreMock{pathResult: filepath.Join(dataDir, "testapp.pid")}
 	procs := &mockProcessManager{}
 	health := &mockHealthChecker{}
 
 	d := NewWithDeps(Config{
 		Name:       "testapp",
 		DataDir:    dataDir,
+		Binary:     "/nonexistent/binary/app",
 		Timeout:    500 * time.Millisecond,
 		HealthPath: "/health",
 	}, pids, procs, health)
@@ -240,7 +249,7 @@ func TestDaemon_Start_LockProtocol_AcquiresStartupLock(t *testing.T) {
 	// Start will acquire startup lock, then PID lock, then call startWithLock
 	// which uses exec.Command with a non-existent binary. The error proves
 	// the lock protocol ran (it got past lock steps to the exec step).
-	err := d.Start(context.Background(), "/nonexistent/binary/app", nil)
+	_, err := d.Start(context.Background())
 
 	if err == nil {
 		t.Fatal("expected error from exec of non-existent binary, got nil")
@@ -267,19 +276,20 @@ func TestDaemon_Start_LockProtocol_AcquiresStartupLock(t *testing.T) {
 func TestDaemon_Start_BinaryNotFound_ReturnsError(t *testing.T) {
 	dataDir := t.TempDir()
 
-	pids := &pidStoreMock{}
+	pids := &pidStoreMock{pathResult: filepath.Join(dataDir, "testapp.pid")}
 	procs := &mockProcessManager{}
 	health := &mockHealthChecker{}
 
 	d := NewWithDeps(Config{
 		Name:       "testapp",
 		DataDir:    dataDir,
+		Binary:     "/no/such/binary",
 		Timeout:    500 * time.Millisecond,
 		HealthPath: "/health",
 	}, pids, procs, health)
 
 	// startWithLock calls exec.Command with a non-existent binary.
-	err := d.Start(context.Background(), "/no/such/binary", nil)
+	_, err := d.Start(context.Background())
 
 	if err == nil {
 		t.Fatal("expected error, got nil")
@@ -300,19 +310,20 @@ func TestDaemon_Start_ErrorCleansPIDLock(t *testing.T) {
 	dataDir := t.TempDir()
 	pidPath := filepath.Join(dataDir, "testapp.pid")
 
-	pids := &pidStoreMock{}
+	pids := &pidStoreMock{pathResult: pidPath}
 	procs := &mockProcessManager{}
 	health := &mockHealthChecker{}
 
 	d := NewWithDeps(Config{
 		Name:       "testapp",
 		DataDir:    dataDir,
+		Binary:     "/nonexistent/binary",
 		Timeout:    500 * time.Millisecond,
 		HealthPath: "/health",
 	}, pids, procs, health)
 
 	// Start with non-existent binary -- startWithLock fails at exec.
-	err := d.Start(context.Background(), "/nonexistent/binary", nil)
+	_, err := d.Start(context.Background())
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -348,13 +359,14 @@ func TestDaemon_Start_ContextCancelled_ReturnsError(t *testing.T) {
 		t.Fatalf("acquire startup lock: %v", acqErr)
 	}
 
-	pids := &pidStoreMock{}
+	pids := &pidStoreMock{pathResult: filepath.Join(dataDir, "testapp.pid")}
 	procs := &mockProcessManager{}
 	health := &mockHealthChecker{}
 
 	d := NewWithDeps(Config{
 		Name:       "testapp",
 		DataDir:    dataDir,
+		Binary:     "/usr/bin/app",
 		Timeout:    500 * time.Millisecond,
 		HealthPath: "/health",
 	}, pids, procs, health)
@@ -363,7 +375,8 @@ func TestDaemon_Start_ContextCancelled_ReturnsError(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		done <- d.Start(ctx, "/usr/bin/app", nil)
+		_, err := d.Start(ctx)
+		done <- err
 	}()
 
 	// Give Start time to block on LockCtx, then cancel.
@@ -393,13 +406,14 @@ func TestStart_ConcurrentStartsSerialized(t *testing.T) {
 	// Both will fail (non-existent binary), but neither should panic or deadlock.
 	dataDir := t.TempDir()
 
-	pids := &pidStoreMock{}
+	pids := &pidStoreMock{pathResult: filepath.Join(dataDir, "testapp.pid")}
 	procs := &mockProcessManager{}
 	health := &mockHealthChecker{}
 
 	d := NewWithDeps(Config{
 		Name:       "testapp",
 		DataDir:    dataDir,
+		Binary:     "/nonexistent/binary",
 		Timeout:    500 * time.Millisecond,
 		HealthPath: "/health",
 	}, pids, procs, health)
@@ -410,7 +424,8 @@ func TestStart_ConcurrentStartsSerialized(t *testing.T) {
 	errs := make(chan error, 2)
 	for range 2 {
 		go func() {
-			errs <- d.Start(ctx, "/nonexistent/binary", nil)
+			_, err := d.Start(ctx)
+			errs <- err
 		}()
 	}
 
@@ -444,6 +459,7 @@ func TestStart_SecondCallBlockedByRunningDaemon(t *testing.T) {
 	pids := &pidStoreMock{
 		aliveResult: true,
 		saved:       &PIDInfo{PID: 5555, Port: 7070, Name: "testapp"},
+		pathResult:  pidPath,
 	}
 	procs := &mockProcessManager{}
 	health := &mockHealthChecker{}
@@ -451,11 +467,12 @@ func TestStart_SecondCallBlockedByRunningDaemon(t *testing.T) {
 	d := NewWithDeps(Config{
 		Name:       "testapp",
 		DataDir:    dataDir,
+		Binary:     "/usr/bin/app",
 		Timeout:    500 * time.Millisecond,
 		HealthPath: "/health",
 	}, pids, procs, health)
 
-	startErr := d.Start(context.Background(), "/usr/bin/app", nil)
+	_, startErr := d.Start(context.Background())
 
 	if startErr == nil {
 		t.Fatal("expected error, got nil")
@@ -529,8 +546,17 @@ func TestReadLogTail_EmptyPath(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestDaemon_Stop_NoPIDFile_Idempotent(t *testing.T) {
-	pids := &pidStoreMock{loadErr: errors.New("pid file not found")}
-	d := newMockDaemon(pids, &mockProcessManager{}, &mockHealthChecker{})
+	dataDir := t.TempDir()
+	pids := &pidStoreMock{
+		loadErr:    errors.New("pid file not found"),
+		pathResult: filepath.Join(dataDir, "testapp.pid"),
+	}
+	d := NewWithDeps(Config{
+		Name:       "testapp",
+		DataDir:    dataDir,
+		Timeout:    100 * time.Millisecond,
+		HealthPath: "/health",
+	}, pids, &mockProcessManager{}, &mockHealthChecker{})
 
 	err := d.Stop(context.Background())
 
@@ -541,13 +567,23 @@ func TestDaemon_Stop_NoPIDFile_Idempotent(t *testing.T) {
 }
 
 func TestDaemon_Stop_DeadProcess_Idempotent(t *testing.T) {
-	pids := &pidStoreMock{saved: &PIDInfo{PID: 9999, Port: 8080}, aliveResult: false}
+	dataDir := t.TempDir()
+	pids := &pidStoreMock{
+		saved:       &PIDInfo{PID: 9999, Port: 8080},
+		aliveResult: false,
+		pathResult:  filepath.Join(dataDir, "testapp.pid"),
+	}
 	procs := &mockProcessManager{aliveResult: false}
-	d := newMockDaemon(pids, procs, &mockHealthChecker{})
+	d := NewWithDeps(Config{
+		Name:       "testapp",
+		DataDir:    dataDir,
+		Timeout:    100 * time.Millisecond,
+		HealthPath: "/health",
+	}, pids, procs, &mockHealthChecker{})
 
 	err := d.Stop(context.Background())
 
-	// Dead process (lock not held) → idempotent nil, no kill.
+	// Dead process (lock not held) -> idempotent nil, no kill.
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -558,11 +594,21 @@ func TestDaemon_Stop_DeadProcess_Idempotent(t *testing.T) {
 
 func TestDaemon_Stop_AliveProcess_KillsProcess(t *testing.T) {
 	const pid = 12345
-	pids := &pidStoreMock{saved: &PIDInfo{PID: pid, Port: 0}, aliveResult: true}
+	dataDir := t.TempDir()
+	pids := &pidStoreMock{
+		saved:       &PIDInfo{PID: pid, Port: 0},
+		aliveResult: true,
+		pathResult:  filepath.Join(dataDir, "testapp.pid"),
+	}
 	procs := &mockProcessManager{aliveResult: true}
-	d := newMockDaemon(pids, procs, &mockHealthChecker{})
+	d := NewWithDeps(Config{
+		Name:       "testapp",
+		DataDir:    dataDir,
+		Timeout:    100 * time.Millisecond,
+		HealthPath: "/health",
+	}, pids, procs, &mockHealthChecker{})
 
-	// Port=0 → HTTP shutdown skipped → direct KillProcess.
+	// Port=0 -> HTTP shutdown skipped -> direct KillProcess.
 	err := d.Stop(context.Background())
 
 	if err != nil {
@@ -574,12 +620,22 @@ func TestDaemon_Stop_AliveProcess_KillsProcess(t *testing.T) {
 }
 
 func TestDaemon_Stop_KillFails_ReturnsError(t *testing.T) {
-	pids := &pidStoreMock{saved: &PIDInfo{PID: 555, Port: 7070}, aliveResult: true}
+	dataDir := t.TempDir()
+	pids := &pidStoreMock{
+		saved:       &PIDInfo{PID: 555, Port: 7070},
+		aliveResult: true,
+		pathResult:  filepath.Join(dataDir, "testapp.pid"),
+	}
 	procs := &mockProcessManager{
 		aliveResult: true,
 		killErr:     errors.New("permission denied"),
 	}
-	d := newMockDaemon(pids, procs, &mockHealthChecker{})
+	d := NewWithDeps(Config{
+		Name:       "testapp",
+		DataDir:    dataDir,
+		Timeout:    100 * time.Millisecond,
+		HealthPath: "/health",
+	}, pids, procs, &mockHealthChecker{})
 
 	err := d.Stop(context.Background())
 
@@ -647,7 +703,7 @@ func TestDaemon_Status_AlivePID_ReturnsRunning(t *testing.T) {
 }
 
 func TestDaemon_Status_LockNotHeld_ReturnsStopped(t *testing.T) {
-	// Lock not held (aliveResult=false) → daemon not running → StatusStopped.
+	// Lock not held (aliveResult=false) -> daemon not running -> StatusStopped.
 	pids := &pidStoreMock{saved: &PIDInfo{PID: 888, Port: 6060}, aliveResult: false}
 	procs := &mockProcessManager{aliveResult: false}
 	d := newMockDaemon(pids, procs, &mockHealthChecker{})
@@ -696,6 +752,7 @@ func TestDaemon_Restart_StopsThenStarts(t *testing.T) {
 	pids := &pidStoreMock{
 		saved:       &PIDInfo{PID: 999, Port: 1111}, // old stale entry
 		aliveResult: false,                          // dead -> Stop is idempotent
+		pathResult:  filepath.Join(dataDir, "testapp.pid"),
 	}
 	procs := &mockProcessManager{aliveResult: false}
 	health := &mockHealthChecker{}
@@ -703,12 +760,13 @@ func TestDaemon_Restart_StopsThenStarts(t *testing.T) {
 	d := NewWithDeps(Config{
 		Name:       "testapp",
 		DataDir:    dataDir,
+		Binary:     "/nonexistent/binary",
 		Timeout:    500 * time.Millisecond,
 		HealthPath: "/health",
 	}, pids, procs, health)
 
 	// Restart = Stop (idempotent) + Start (fails at exec of non-existent binary).
-	err := d.Restart(context.Background(), "/nonexistent/binary", nil)
+	_, err := d.Restart(context.Background())
 
 	// Error expected from Start (exec failure), not from Stop.
 	if err == nil {
@@ -723,7 +781,8 @@ func TestDaemon_Restart_IgnoresStopError(t *testing.T) {
 	dataDir := t.TempDir()
 
 	pids := &pidStoreMock{
-		loadErr: errors.New("no pid file"),
+		loadErr:    errors.New("no pid file"),
+		pathResult: filepath.Join(dataDir, "testapp.pid"),
 	}
 	procs := &mockProcessManager{}
 	health := &mockHealthChecker{}
@@ -731,13 +790,14 @@ func TestDaemon_Restart_IgnoresStopError(t *testing.T) {
 	d := NewWithDeps(Config{
 		Name:       "testapp",
 		DataDir:    dataDir,
+		Binary:     "/nonexistent/binary",
 		Timeout:    500 * time.Millisecond,
 		HealthPath: "/health",
 	}, pids, procs, health)
 
 	// Restart ignores Stop error and proceeds to Start.
 	// Start will fail at exec, but the point is it reaches Start.
-	err := d.Restart(context.Background(), "/nonexistent/binary", nil)
+	_, err := d.Restart(context.Background())
 
 	if err == nil {
 		t.Fatal("expected error from exec, got nil")
@@ -745,6 +805,36 @@ func TestDaemon_Restart_IgnoresStopError(t *testing.T) {
 	// Must contain Start error (not Stop error).
 	if !strings.Contains(err.Error(), "start testapp") {
 		t.Errorf("error must come from Start phase, got: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Tests: Start return value (*Info)
+// ---------------------------------------------------------------------------
+
+func TestDaemon_Start_ReturnsInfoOnSuccess_Integration(t *testing.T) {
+	// This is tested indirectly: Start returns *Info which contains
+	// PID, Port, Name from the PID file. The "binary not found" tests
+	// above verify the error path. Full integration tests are in
+	// the integration test package.
+
+	// Verify the Start signature returns (*Info, error).
+	dataDir := t.TempDir()
+	pids := &pidStoreMock{pathResult: filepath.Join(dataDir, "testapp.pid")}
+	d := NewWithDeps(Config{
+		Name:       "testapp",
+		DataDir:    dataDir,
+		Binary:     "/nonexistent/binary",
+		Timeout:    100 * time.Millisecond,
+		HealthPath: "/health",
+	}, pids, &mockProcessManager{}, &mockHealthChecker{})
+
+	info, err := d.Start(context.Background())
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if info != nil {
+		t.Errorf("info must be nil on error, got %+v", info)
 	}
 }
 
@@ -788,20 +878,21 @@ func TestDaemon_Start_CreatesDataDir(t *testing.T) {
 	parent := t.TempDir()
 	nestedDir := parent + "/sub/nested/datadir"
 
-	pids := &pidStoreMock{}
+	pids := &pidStoreMock{pathResult: filepath.Join(nestedDir, "mkdirtest.pid")}
 	procs := &mockProcessManager{}
 	health := &mockHealthChecker{}
 
 	d := NewWithDeps(Config{
 		Name:       "mkdirtest",
 		DataDir:    nestedDir,
+		Binary:     "/nonexistent/binary",
 		Timeout:    500 * time.Millisecond,
 		HealthPath: "/health",
 	}, pids, procs, health)
 
 	// Start will fail at exec (non-existent binary), but DataDir
 	// must be created BEFORE lock acquisition.
-	_ = d.Start(context.Background(), "/nonexistent/binary", nil)
+	_, _ = d.Start(context.Background())
 
 	// Verify the directory was actually created on disk.
 	info, statErr := fileStatForTest(nestedDir)
@@ -817,19 +908,20 @@ func TestDaemon_Start_DataDirAlreadyExists_Succeeds(t *testing.T) {
 	// DataDir pre-exists — MkdirAll is idempotent, Start proceeds to lock step.
 	existingDir := t.TempDir()
 
-	pids := &pidStoreMock{}
+	pids := &pidStoreMock{pathResult: filepath.Join(existingDir, "existtest.pid")}
 	procs := &mockProcessManager{}
 	health := &mockHealthChecker{}
 
 	d := NewWithDeps(Config{
 		Name:       "existtest",
 		DataDir:    existingDir,
+		Binary:     "/nonexistent/binary",
 		Timeout:    500 * time.Millisecond,
 		HealthPath: "/health",
 	}, pids, procs, health)
 
 	// Will fail at exec, but should not fail at DataDir creation.
-	err := d.Start(context.Background(), "/nonexistent/binary", nil)
+	_, err := d.Start(context.Background())
 	if err == nil {
 		t.Fatal("expected error from non-existent binary")
 	}
@@ -849,12 +941,19 @@ func TestDaemon_Start_DataDirAlreadyExists_Succeeds(t *testing.T) {
 // returns false (lock not held — PID recycled or daemon died), Stop
 // returns nil without killing.
 func TestDaemon_Stop_StalePID_Idempotent(t *testing.T) {
+	dataDir := t.TempDir()
 	pids := &pidStoreMock{
 		saved:       &PIDInfo{PID: 77777, Port: 8080, Name: "testapp"},
 		aliveResult: false,
+		pathResult:  filepath.Join(dataDir, "testapp.pid"),
 	}
 	procs := &mockProcessManager{aliveResult: false}
-	d := newMockDaemon(pids, procs, &mockHealthChecker{})
+	d := NewWithDeps(Config{
+		Name:       "testapp",
+		DataDir:    dataDir,
+		Timeout:    100 * time.Millisecond,
+		HealthPath: "/health",
+	}, pids, procs, &mockHealthChecker{})
 
 	err := d.Stop(context.Background())
 	if err != nil {
@@ -893,13 +992,13 @@ func TestConnTracker_Disconnect_DoubleDisconnect_StaysZero(t *testing.T) {
 }
 
 func TestConnTracker_Disconnect_StrayExtraDisconnect_OtherConnectionsIntact(t *testing.T) {
-	// Connect A, Connect B, stray Disconnect, Disconnect A → B still connected.
+	// Connect A, Connect B, stray Disconnect, Disconnect A -> B still connected.
 	ct := NewConnTracker()
 
 	ct.Connect()    // A
 	ct.Connect()    // B
-	ct.Disconnect() // stray (simulates crashed client) — count goes 2→1
-	ct.Disconnect() // A disconnects — count goes 1→0
+	ct.Disconnect() // stray (simulates crashed client) — count goes 2->1
+	ct.Disconnect() // A disconnects — count goes 1->0
 
 	// B is still logically connected, but the stray Disconnect consumed A's slot.
 	// The clamp ensures we never see negative values; actual count is 0.
@@ -941,5 +1040,69 @@ func TestConnTracker_ClampNeverGoesNegative_TableDriven(t *testing.T) {
 				t.Errorf("Active() = %d, want >= %d", got, tt.wantMin)
 			}
 		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Tests: EnsureRunning (package-level convenience wrapper)
+// ---------------------------------------------------------------------------
+
+func TestEnsureRunning_PackageLevel_ReturnsPort(t *testing.T) {
+	// Package-level EnsureRunning creates a real Daemon internally.
+	// It will fail due to non-existent binary, but we verify the
+	// function signature and error propagation.
+	dataDir := t.TempDir()
+	cfg := Config{
+		Name:    "pkg-ensure",
+		DataDir: dataDir,
+		Binary:  "/nonexistent/binary",
+		Timeout: 100 * time.Millisecond,
+	}
+
+	port, err := EnsureRunning(context.Background(), cfg)
+	if err == nil {
+		t.Fatal("expected error from non-existent binary")
+	}
+	if port != 0 {
+		t.Errorf("port must be 0 on error, got %d", port)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Tests: buildInfo helper
+// ---------------------------------------------------------------------------
+
+func TestDaemon_BuildInfo_ComputesUptime(t *testing.T) {
+	startTime := time.Now().Add(-10 * time.Second)
+	d := newMockDaemon(&pidStoreMock{}, &mockProcessManager{}, &mockHealthChecker{})
+
+	info := d.buildInfo(PIDInfo{
+		PID:       42,
+		Port:      8080,
+		Name:      "testapp",
+		StartTime: startTime,
+	})
+
+	if info.Status != StatusRunning {
+		t.Errorf("got %v, want %v", info.Status, StatusRunning)
+	}
+	if info.PID != 42 {
+		t.Errorf("got %d, want 42", info.PID)
+	}
+	if info.Port != 8080 {
+		t.Errorf("got %d, want 8080", info.Port)
+	}
+	if info.Uptime < 9*time.Second {
+		t.Errorf("uptime %v too small for 10s-ago start", info.Uptime)
+	}
+}
+
+func TestDaemon_BuildInfo_ZeroStartTime_ZeroUptime(t *testing.T) {
+	d := newMockDaemon(&pidStoreMock{}, &mockProcessManager{}, &mockHealthChecker{})
+
+	info := d.buildInfo(PIDInfo{PID: 1, Port: 80})
+
+	if info.Uptime != 0 {
+		t.Errorf("zero StartTime must produce zero Uptime, got %v", info.Uptime)
 	}
 }
