@@ -5,6 +5,41 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] - 2026-09-12
+
+### Added
+
+- **`GET /daemon/attach`** — lease-based connection tracking. The TCP connection IS the lease: when the client process dies (SIGKILL, OOM, closed terminal), the kernel closes the socket, the connection count drops, and idle auto-shutdown can proceed. No timers, no heartbeats. Proxy tries attach first, falls back to connect/disconnect for v0.3.0 daemons
+- **Control-plane bearer token** — `Serve()` generates a token via `rand.Text()` (`crypto/rand`, Go 1.24+) and writes it to the PID file (0600 by `pidlock.TryLock` — owner-only readable). All `/daemon/*` endpoints require `Authorization: Bearer <token>`. Clients (`Proxy`, `Stop`) read the token from the PID file automatically
+- **`Config.RequireToken`** (`bool`, default `false`) — when true, the bearer token is also required for the application handler (everything outside `/health` and `/daemon/*`). Recommended for MCP deployments where the app handler serves JSON-RPC
+- **`PIDInfo.Token`** (`string`, `omitempty`) — bearer token stored in the PID file for client authentication
+- **`authGuard` middleware** — constant-time token comparison via `crypto/subtle.ConstantTimeCompare`. Chain: `loopbackGuard` -> `authGuard` -> `mux`
+- Integration tests: lease survives crash (raw `net.Conn` attach), shutdown requires token (401 without, success with), attached clients do not block `Stop`
+
+### Deprecated
+
+- `POST /daemon/connect` — use `GET /daemon/attach` instead. Kept for backward compatibility with v0.3.0 proxies
+- `POST /daemon/disconnect` — use `GET /daemon/attach` instead. Kept for backward compatibility with v0.3.0 proxies
+
+### Security
+
+- DNS rebinding hardening completed by bearer token — even if `loopbackGuard` is bypassed (crafted Host header), the attacker cannot issue control-plane commands without the token from the 0600 PID file
+- Token never appears in proxy.log, daemon logs, or error messages (`LogPayloads` logs bodies only, never headers)
+- Windows note: `pidlock` creates the file with default security attributes inheriting the `DataDir` ACL; `DataDir` under the user profile is the supported configuration
+
+### Notes
+
+**Mixed-version behavior:**
+
+| Proxy version | Daemon version | Behavior |
+|---|---|---|
+| v0.3.1 | v0.3.1 | Lease attach + bearer token (optimal) |
+| v0.3.1 | v0.3.0 | Fallback to connect/disconnect, no token (compatible) |
+| v0.3.0 | v0.3.1 | connect/disconnect with 401 (token required) — **upgrade proxy** |
+| v0.3.0 | v0.3.0 | connect/disconnect, no token (unchanged) |
+
+A v0.3.0 proxy cannot authenticate with a v0.3.1 daemon. Upgrade both simultaneously or upgrade the daemon first, then the proxy.
+
 ## [0.3.0] - 2026-09-12
 
 ### Breaking Changes
@@ -131,6 +166,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CI: GitHub Actions (build/test/lint/fmt on 3 OS, codecov OIDC)
 - Docs: README, CONTRIBUTING, SECURITY, CODE_OF_CONDUCT, AGENTS, llms.txt
 
+[0.3.1]: https://github.com/grpmsoft/daemon/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/grpmsoft/daemon/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/grpmsoft/daemon/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/grpmsoft/daemon/compare/v0.1.0...v0.1.1

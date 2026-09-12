@@ -160,8 +160,27 @@ Race-safe: if two agents call `EnsureRunning` simultaneously and one wins the st
 | `Timeout` | `time.Duration` | `30s` | How long `Start()` waits for health check to pass |
 | `HealthPath` | `string` | `"/health"` | HTTP path for the health endpoint |
 | `IdleTimeout` | `time.Duration` | `0` (disabled) | Auto-shutdown after this duration with zero connections |
+| `RequireToken` | `bool` | `false` | When true, bearer token required for app handler too |
 
 **Note:** `DataDir` will contain a persistent `<Name>.lock` file used to serialize concurrent `EnsureRunning` calls. After a binary upgrade (`go install`), `EnsureRunning` returns the existing daemon's port -- call `Restart()` to pick up the new binary. Set `Binary` and `Args` in Config once; all lifecycle methods (`Start`, `Stop`, `Restart`, `EnsureRunning`) use them automatically.
+
+## Control-Plane Endpoints
+
+`Serve()` registers internal endpoints for lifecycle management. All `/daemon/*` endpoints require a bearer token (generated at startup, stored in the PID file).
+
+| Method | Path | Auth | Purpose |
+|--------|------|------|---------|
+| `GET` | `/health` | None | Health check (used by `WaitUntilReady`) |
+| `GET` | `/daemon/attach` | Bearer | Lease-based connection tracking (v0.3.1+) |
+| `POST` | `/daemon/connect` | Bearer | Increment connection count (deprecated, use attach) |
+| `POST` | `/daemon/disconnect` | Bearer | Decrement connection count (deprecated, use attach) |
+| `POST` | `/daemon/shutdown` | Bearer | Graceful shutdown |
+
+### Lease-Based Connection Tracking
+
+`Proxy()` opens `GET /daemon/attach` and keeps the TCP connection alive for its lifetime. The connection IS the lease -- when the proxy process dies (SIGKILL, OOM, closed terminal), the kernel closes the socket, the connection count drops, and idle auto-shutdown can proceed. No heartbeats, no timers, no stray counts from crashed clients.
+
+If the daemon doesn't support `/daemon/attach` (v0.3.0), the proxy falls back to `POST /daemon/connect` and `POST /daemon/disconnect`.
 
 ## run.Group
 

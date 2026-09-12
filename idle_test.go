@@ -43,9 +43,18 @@ func TestServe_ConnectDisconnectEndpoints(t *testing.T) {
 
 	client := &http.Client{Timeout: 5 * time.Second}
 
+	// Read the token from PID file — required for /daemon/* endpoints since v0.3.1.
+	data, err := store.Load()
+	if err != nil {
+		t.Fatalf("load PID info: %v", err)
+	}
+	token := data.Token
+
 	// POST /daemon/connect must return 204.
 	connectURL := fmt.Sprintf("http://127.0.0.1:%d/daemon/connect", port)
-	resp, err := client.Post(connectURL, "", nil) //nolint:noctx
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, connectURL, nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := client.Do(req)
 	if err != nil {
 		t.Fatalf("POST /daemon/connect: %v", err)
 	}
@@ -56,7 +65,9 @@ func TestServe_ConnectDisconnectEndpoints(t *testing.T) {
 
 	// POST /daemon/disconnect must return 204.
 	disconnectURL := fmt.Sprintf("http://127.0.0.1:%d/daemon/disconnect", port)
-	resp, err = client.Post(disconnectURL, "", nil) //nolint:noctx
+	req, _ = http.NewRequestWithContext(ctx, http.MethodPost, disconnectURL, nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err = client.Do(req)
 	if err != nil {
 		t.Fatalf("POST /daemon/disconnect: %v", err)
 	}
@@ -112,8 +123,16 @@ func TestServe_IdleAutoShutdown(t *testing.T) {
 	client := &http.Client{Timeout: 5 * time.Second}
 	base := fmt.Sprintf("http://127.0.0.1:%d", port)
 
+	// Read the token from PID file.
+	data, err := store.Load()
+	if err != nil {
+		t.Fatalf("load PID info: %v", err)
+	}
+	token := data.Token
+
 	// Connect, then disconnect to trigger idle countdown.
 	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, base+"/daemon/connect", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
 	resp, err := client.Do(req)
 	if err != nil {
 		t.Fatalf("POST /daemon/connect: %v", err)
@@ -121,6 +140,7 @@ func TestServe_IdleAutoShutdown(t *testing.T) {
 	_ = resp.Body.Close()
 
 	req, _ = http.NewRequestWithContext(ctx, http.MethodPost, base+"/daemon/disconnect", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
 	resp, err = client.Do(req)
 	if err != nil {
 		t.Fatalf("POST /daemon/disconnect: %v", err)

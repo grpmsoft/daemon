@@ -60,7 +60,7 @@ func Proxy(ctx context.Context, cfg Config, opts ProxyOptions) error {
 
 	pidPath := filepath.Join(cfg.DataDir, cfg.Name+".pid")
 
-	port, err := readPort(pidPath)
+	info, err := readPIDInfo(pidPath)
 	if err != nil {
 		return fmt.Errorf("proxy: %w", err)
 	}
@@ -69,24 +69,31 @@ func Proxy(ctx context.Context, cfg Config, opts ProxyOptions) error {
 		return fmt.Errorf("proxy: %w", ErrNotRunning)
 	}
 
-	baseURL := fmt.Sprintf("http://127.0.0.1:%d%s", port, opts.MCPPath)
-	daemonBase := fmt.Sprintf("http://127.0.0.1:%d", port)
+	baseURL := fmt.Sprintf("http://127.0.0.1:%d%s", info.Port, opts.MCPPath)
+	daemonBase := fmt.Sprintf("http://127.0.0.1:%d", info.Port)
+	token := info.Token
 
-	plog := proxyLogger(cfg)
+	plog, plogClose := proxyLogger(cfg)
+	defer plogClose()
 
 	// No hardcoded Timeout — use ctx for deadline control.
 	client := &http.Client{}
 
-	// Short-timeout client for control calls (connect/disconnect).
-	controlClient := &http.Client{Timeout: 5 * time.Second}
-
 	plog.Printf("proxy started, target=%s", baseURL)
 
-	connected := signalConnect(ctx, controlClient, daemonBase)
+	// Try lease-based attach first (v0.3.1+). If the daemon returns 404
+	// (v0.3.0 daemon without /daemon/attach), fall back to the deprecated
+	// POST connect/disconnect pair.
+	attachCancel, fallbackConnected := proxyAttach(ctx, daemonBase, token, plog)
 	defer func() {
-		if connected {
+		if attachCancel != nil {
+			// Lease mode: cancel the attach context to close the TCP connection.
+			attachCancel()
+		} else if fallbackConnected {
+			// Fallback mode: send explicit disconnect.
 			plog.Printf("proxy stopping, sending disconnect")
-			signalDisconnect(controlClient, daemonBase)
+			controlClient := &http.Client{Timeout: 5 * time.Second}
+			signalDisconnect(controlClient, daemonBase, token)
 		}
 	}()
 
@@ -120,7 +127,7 @@ func Proxy(ctx context.Context, cfg Config, opts ProxyOptions) error {
 			plog.Printf("msg #%d REQ len=%d body=%s", msgCount, len(line), truncate(line, 500))
 		}
 
-		resp, statusCode, reqErr := proxyRequest(ctx, client, baseURL, line)
+		resp, statusCode, reqErr := proxyRequest(ctx, client, baseURL, token, line)
 		if reqErr != nil {
 			plog.Printf("msg #%d ERROR: %v", msgCount, reqErr)
 			return fmt.Errorf("proxy to %s: %w", baseURL, reqErr)
@@ -150,34 +157,117 @@ func truncate(b []byte, limit int) string {
 	return string(b[:limit]) + "..."
 }
 
-func readPort(pidPath string) (int, error) {
+func readPIDInfo(pidPath string) (PIDInfo, error) {
 	data, err := pidlock.ReadLocked(pidPath)
 	if err != nil {
-		return 0, fmt.Errorf("read pid file: %w", err)
+		return PIDInfo{}, fmt.Errorf("read pid file: %w", err)
 	}
 	var info PIDInfo
 	if err := json.Unmarshal(data, &info); err != nil {
-		return 0, fmt.Errorf("parse pid file: %w", err)
+		return PIDInfo{}, fmt.Errorf("parse pid file: %w", err)
 	}
 	if info.Port <= 0 {
-		return 0, fmt.Errorf("daemon running but port is %d", info.Port)
+		return PIDInfo{}, fmt.Errorf("daemon running but port is %d", info.Port)
 	}
-	return info.Port, nil
+	return info, nil
 }
 
-func proxyLogger(cfg Config) *log.Logger {
+// proxyLogger creates a logger that writes to proxy.log in DataDir.
+// Returns the logger and a cleanup function that closes the log file.
+func proxyLogger(cfg Config) (*log.Logger, func()) {
 	logPath := filepath.Join(cfg.DataDir, "proxy.log")
 	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600) //nolint:gosec // logPath from Config.DataDir
 	if err != nil {
-		return log.New(io.Discard, "", 0)
+		return log.New(io.Discard, "", 0), func() {}
 	}
-	return log.New(f, fmt.Sprintf("[proxy:%s] ", cfg.Name), log.LstdFlags)
+	return log.New(f, fmt.Sprintf("[proxy:%s] ", cfg.Name), log.LstdFlags), func() { _ = f.Close() }
 }
 
-func signalConnect(ctx context.Context, client *http.Client, daemonBase string) bool {
+// proxyAttach tries lease-based attach (GET /daemon/attach). Returns:
+//   - (cancelFunc, false) if lease succeeded — caller must cancel on exit.
+//   - (nil, true) if 404 fallback to connect/disconnect succeeded.
+//   - (nil, false) if nothing connected.
+func proxyAttach(ctx context.Context, daemonBase, token string, plog *log.Logger) (context.CancelFunc, bool) {
+	attachCtx, attachCancel := context.WithCancel(ctx)
+	req, err := http.NewRequestWithContext(attachCtx, http.MethodGet, daemonBase+"/daemon/attach", nil)
+	if err != nil {
+		attachCancel()
+		return nil, false
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+
+	// Use a transport with no idle timeout to keep the connection alive.
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		attachCancel()
+		// Connection error — daemon may be dead.
+		return nil, false
+	}
+
+	// 404 means v0.3.0 daemon without /daemon/attach — fall back.
+	if resp.StatusCode == http.StatusNotFound {
+		_ = resp.Body.Close()
+		attachCancel()
+		plog.Printf("attach endpoint not available (404), falling back to connect/disconnect")
+		controlClient := &http.Client{Timeout: 5 * time.Second}
+		connected := signalConnect(ctx, controlClient, daemonBase, token)
+		return nil, connected
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		_ = resp.Body.Close()
+		attachCancel()
+		plog.Printf("attach returned unexpected status %d", resp.StatusCode)
+		return nil, false
+	}
+
+	// Wait for ack byte with 2-second timeout.
+	ackDone := make(chan error, 1)
+	go func() {
+		ack := make([]byte, 1)
+		_, readErr := resp.Body.Read(ack)
+		ackDone <- readErr
+	}()
+	select {
+	case ackErr := <-ackDone:
+		if ackErr != nil {
+			_ = resp.Body.Close()
+			attachCancel()
+			plog.Printf("attach ack read error: %v", ackErr)
+			return nil, false
+		}
+	case <-time.After(2 * time.Second):
+		_ = resp.Body.Close()
+		attachCancel()
+		plog.Printf("attach ack timeout (2s)")
+		return nil, false
+	}
+
+	plog.Printf("attached via lease (TCP connection)")
+
+	// Keep resp.Body open for proxy lifetime. When attachCancel() is called,
+	// the request context is cancelled, which closes the TCP connection and
+	// causes the daemon's handler to observe r.Context().Done().
+	// We don't close resp.Body here — attachCancel() handles cleanup.
+	go func() {
+		// Block until the connection is closed (context cancelled or daemon shutdown).
+		_, _ = io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+	}()
+
+	return attachCancel, false
+}
+
+func signalConnect(ctx context.Context, client *http.Client, daemonBase, token string) bool {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, daemonBase+"/daemon/connect", nil)
 	if err != nil {
 		return false
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
 	}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -187,12 +277,15 @@ func signalConnect(ctx context.Context, client *http.Client, daemonBase string) 
 	return resp.StatusCode < 300
 }
 
-func signalDisconnect(client *http.Client, daemonBase string) {
+func signalDisconnect(client *http.Client, daemonBase, token string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, daemonBase+"/daemon/disconnect", nil)
 	if err != nil {
 		return
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
 	}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -201,12 +294,15 @@ func signalDisconnect(client *http.Client, daemonBase string) {
 	_ = resp.Body.Close()
 }
 
-func proxyRequest(ctx context.Context, client *http.Client, url string, body []byte) ([]byte, int, error) {
+func proxyRequest(ctx context.Context, client *http.Client, url, token string, body []byte) ([]byte, int, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return nil, 0, fmt.Errorf("create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
 
 	resp, err := client.Do(req)
 	if err != nil {

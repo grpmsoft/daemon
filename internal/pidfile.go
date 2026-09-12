@@ -21,6 +21,7 @@ type pidData struct {
 	Name      string    `json:"name"`
 	Binary    string    `json:"binary,omitempty"`
 	StartTime time.Time `json:"startTime"`
+	Token     string    `json:"token,omitempty"`
 }
 
 // PIDInfo mirrors daemon.PIDInfo for the PIDStore interface contract.
@@ -30,6 +31,7 @@ type PIDInfo struct {
 	Name      string    `json:"name"`
 	Binary    string    `json:"binary"`
 	StartTime time.Time `json:"startTime"`
+	Token     string    `json:"token,omitempty"`
 }
 
 // PIDFile manages reading and writing a JSON PID file on disk.

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -50,7 +51,7 @@ func TestProxyRequest_SuccessReturnsBody(t *testing.T) {
 	defer srv.Close()
 
 	client := &http.Client{Timeout: 5 * time.Second}
-	body, _, err := proxyRequest(context.Background(), client, srv.URL+"/mcp", []byte(`{"id":1}`))
+	body, _, err := proxyRequest(context.Background(), client, srv.URL+"/mcp", "", []byte(`{"id":1}`))
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -67,7 +68,7 @@ func TestProxyRequest_4xxReturnsError(t *testing.T) {
 	defer srv.Close()
 
 	client := &http.Client{Timeout: 5 * time.Second}
-	_, _, err := proxyRequest(context.Background(), client, srv.URL+"/mcp", []byte(`{}`))
+	_, _, err := proxyRequest(context.Background(), client, srv.URL+"/mcp", "", []byte(`{}`))
 
 	if err == nil {
 		t.Fatal("expected error, got nil")
@@ -84,7 +85,7 @@ func TestProxyRequest_5xxReturnsError(t *testing.T) {
 	defer srv.Close()
 
 	client := &http.Client{Timeout: 5 * time.Second}
-	_, _, err := proxyRequest(context.Background(), client, srv.URL+"/mcp", []byte(`{}`))
+	_, _, err := proxyRequest(context.Background(), client, srv.URL+"/mcp", "", []byte(`{}`))
 
 	if err == nil {
 		t.Fatal("expected error, got nil")
@@ -102,6 +103,7 @@ func TestProxyRequest_ConnectionRefused_ReturnsError(t *testing.T) {
 		context.Background(),
 		client,
 		fmt.Sprintf("http://127.0.0.1:%d/mcp", port),
+		"",
 		[]byte(`{}`),
 	)
 
@@ -123,7 +125,7 @@ func TestProxyRequest_ContextCancelled_ReturnsError(t *testing.T) {
 	cancel() // pre-cancelled
 
 	client := &http.Client{Timeout: 5 * time.Second}
-	_, _, err := proxyRequest(ctx, client, srv.URL+"/mcp", []byte(`{}`))
+	_, _, err := proxyRequest(ctx, client, srv.URL+"/mcp", "", []byte(`{}`))
 
 	if err == nil {
 		t.Fatal("expected error, got nil")
@@ -166,7 +168,7 @@ func TestProxy_URLConstruction(t *testing.T) {
 	url := fmt.Sprintf("http://127.0.0.1:%d%s", port, mcpPath)
 
 	client := &http.Client{Timeout: 5 * time.Second}
-	_, _, err := proxyRequest(context.Background(), client, url, []byte(`{}`))
+	_, _, err := proxyRequest(context.Background(), client, url, "", []byte(`{}`))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -197,6 +199,7 @@ func TestProxy_LargeBody(t *testing.T) {
 		context.Background(),
 		client,
 		srv.URL+"/mcp",
+		"",
 		[]byte(`{"data":"`+large+`"}`),
 	)
 	if err != nil {
@@ -275,4 +278,78 @@ func TestProxy_NoPIDFile_ReturnsError(t *testing.T) {
 	if errors.Is(err, ErrNotRunning) {
 		t.Errorf("missing PID file should not return ErrNotRunning, got: %v", err)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Tests: proxyAttach fallback
+// ---------------------------------------------------------------------------
+
+// TestProxyAttach_FallbackOnNotFound verifies that proxyAttach falls back to
+// signalConnect when the daemon returns 404 for /daemon/attach (v0.3.0 compat).
+func TestProxyAttach_FallbackOnNotFound(t *testing.T) {
+	var connectCalled bool
+
+	// Simulate a v0.3.0 daemon: /daemon/attach returns 404, /daemon/connect works.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/daemon/attach":
+			http.NotFound(w, r)
+		case "/daemon/connect":
+			connectCalled = true
+			w.WriteHeader(http.StatusNoContent)
+		case "/daemon/disconnect":
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	plog := log.New(io.Discard, "", 0)
+	cancelFn, connected := proxyAttach(context.Background(), srv.URL, "", plog)
+
+	// Must have fallen back to connect/disconnect.
+	if cancelFn != nil {
+		t.Error("cancelFn should be nil in fallback mode")
+		cancelFn()
+	}
+	if !connected {
+		t.Error("should report connected=true after fallback to signalConnect")
+	}
+	if !connectCalled {
+		t.Error("/daemon/connect should have been called in fallback mode")
+	}
+}
+
+// TestProxyAttach_LeaseMode verifies that proxyAttach returns a cancel function
+// when attach succeeds (200 + ack byte).
+func TestProxyAttach_LeaseMode(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/daemon/attach" {
+			w.Header().Set("Content-Type", "application/octet-stream")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte{0x00})
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+			// Block until client disconnects.
+			<-r.Context().Done()
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	plog := log.New(io.Discard, "", 0)
+	cancelFn, connected := proxyAttach(context.Background(), srv.URL, "", plog)
+
+	if cancelFn == nil {
+		t.Fatal("cancelFn should be non-nil in lease mode")
+	}
+	if connected {
+		t.Error("connected should be false in lease mode (only for fallback)")
+	}
+
+	// Clean up — cancel the attach context.
+	cancelFn()
 }
