@@ -4,6 +4,7 @@ package internal
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"syscall"
@@ -37,9 +38,11 @@ func LockCtx(ctx context.Context, path string) (*os.File, error) {
 
 	h := syscall.Handle(f.Fd())
 
+	const errLockViolation = syscall.Errno(33)
+
 	for {
 		ol := new(syscall.Overlapped)
-		r1, _, _ := procLockFileEx.Call(
+		r1, _, e1 := procLockFileEx.Call(
 			uintptr(h),
 			uintptr(lockfileExclusiveLock|lockfileFailImmediately),
 			0,
@@ -48,6 +51,12 @@ func LockCtx(ctx context.Context, path string) (*os.File, error) {
 		)
 		if r1 != 0 {
 			return f, nil
+		}
+		// Only retry on lock contention. Other errors (invalid handle,
+		// access denied) are permanent — return immediately.
+		if !errors.Is(e1, errLockViolation) {
+			_ = f.Close()
+			return nil, fmt.Errorf("acquire lock %s: %w", path, e1)
 		}
 
 		select {

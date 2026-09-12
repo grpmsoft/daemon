@@ -24,7 +24,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`POST /daemon/shutdown`**: cross-platform graceful stop endpoint. Stop() tries HTTP first (5s), waits for lock release (10s), falls back to kill
 - **`ProxyOptions`**: `Stdin io.Reader`, `Stdout io.Writer` (testable), `LogPayloads bool` (opt-in, S3 security), `MCPPath string`
 - **CAS Disconnect**: CompareAndSwap loop replaces Add+Store (atomic race fix)
-- **fd inheritance**: `EnsureRunning` passes locked PID file fd to child via `ExtraFiles` + `DAEMON_PIDFD=3`. Child inherits lock with zero gap
+- **fd inheritance** (Unix): `EnsureRunning` passes locked PID file fd to child via `ExtraFiles` + `DAEMON_PIDFD=3`. Child inherits lock with zero gap
+- **Startup lock protocol**: two locks, two purposes — `.lock` (flock/LockFileEx) serializes starters, `.pid` (flock/share-mode) signals liveness. Correct ordering eliminates race conditions
+- **`internal.LockCtx(ctx, path)`**: ctx-aware startup lock with LOCK_NB/LOCKFILE_FAIL_IMMEDIATELY poll loop (50ms). Respects context cancellation
+- **N12 recovery**: if starter dies mid-spawn, waitForPort detects freed lock and falls through to spawn path under startup lock
+- **Windows path**: platform-specific `setupExtraFiles` — no ExtraFiles (Go #26182), child TryLock with retry. Windows LockCtx checks ERROR_LOCK_VIOLATION specifically
+- **5 integration tests**: helper-process pattern (no external binaries). ConcurrentEnsureRunning, StopHonoursDeadline, StopIdempotent, IdleShutdown, HolderDiesMidSpawn
 - **EINTR retry**: flock retries on signal interruption (matches `cmd/go/internal/lockedfile`)
 
 ### Changed
