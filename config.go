@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -100,6 +101,11 @@ func (c *Config) Validate() error {
 }
 
 func (c *Config) applyDefaults() {
+	if c.DataDir != "" {
+		if abs, err := filepath.Abs(c.DataDir); err == nil {
+			c.DataDir = abs
+		}
+	}
 	if c.Timeout == 0 {
 		c.Timeout = 30 * time.Second
 	}
@@ -112,6 +118,11 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Dir == "" {
 		c.Dir = c.DataDir
+	}
+	if c.Dir != "" {
+		if abs, err := filepath.Abs(c.Dir); err == nil {
+			c.Dir = abs
+		}
 	}
 }
 

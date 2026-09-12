@@ -1,8 +1,8 @@
 # Roadmap
 
-## Current State: v0.3.1
+## Current State: v0.3.3
 
-Cross-platform daemon lifecycle library with unified lock protocol (ADR-002),
+Cross-platform daemon lifecycle library with unified lock protocol,
 lease-based connection tracking (ADR-003), and control-plane bearer token.
 
 ### What works
@@ -14,9 +14,7 @@ lease-based connection tracking (ADR-003), and control-plane bearer token.
 - Binary/Args in Config — daemon identity per-config, not per-call
 - All mutating methods return *Info (pid, port, start time)
 - Graceful stop: HTTP /daemon/shutdown → clean exit on all platforms
-- Lease-based connection tracking: GET /daemon/attach — TCP lease, crash-safe (ADR-003)
-- Bearer token on /daemon/* endpoints — PID file 0600 as auth boundary (ADR-003)
-- Backward compat: connect/disconnect still work, token optional for old daemons
+- Lease-based connection tracking: GET /daemon/attach — TCP lease, crash-safe- Bearer token on /daemon/* endpoints — PID file 0600 as auth boundary- Backward compat: connect/disconnect still work, token optional for old daemons
 - Orphan child killed on start failure
 - Cross-platform: Windows (share-mode), Linux/macOS (flock), BSD (flock)
 - CI: Node 24 actions, Dependabot

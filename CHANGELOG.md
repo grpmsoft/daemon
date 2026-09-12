@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.3] - 2026-09-12
+
+### Added
+
+- **`Config.Dir`**: working directory for the spawned daemon process. Default = `DataDir` (absolute). Prevents the daemon from holding the parent's CWD, which may be deleted or unmounted after start
+- `DataDir` is now resolved to an absolute path in `applyDefaults()`, ensuring relative paths like `.gode` work correctly with `Dir` and `DAEMON_DATA_DIR`
+
+## [0.3.2] - 2026-09-12
+
+### Changed
+
+- Removed unused docs files from git tracking
+
 ## [0.3.1] - 2026-09-12
 
 ### Added
@@ -53,8 +66,7 @@ A v0.3.0 proxy cannot authenticate with a v0.3.1 daemon. Upgrade both simultaneo
 
 ### Added
 
-- Unified lock protocol: all lifecycle mutations (`Start`, `Stop`, `Restart`, `EnsureRunning`) serialize on the startup lock (ADR-002)
-- `startLocked`/`stopLocked` internal methods — public methods never call other public methods (prevents double-lock deadlocks)
+- Unified lock protocol: all lifecycle mutations (`Start`, `Stop`, `Restart`, `EnsureRunning`) serialize on the startup lock- `startLocked`/`stopLocked` internal methods — public methods never call other public methods (prevents double-lock deadlocks)
 - `Config.Binary` (`string`) — executable path for the daemon process, defaults to `os.Executable()` when empty
 - `Config.Args` (`[]string`) — arguments passed to the child process in `Start()`/`Restart()`
 - `buildInfo()` helper — consistent `*Info` construction from `PIDInfo`
@@ -166,6 +178,8 @@ A v0.3.0 proxy cannot authenticate with a v0.3.1 daemon. Upgrade both simultaneo
 - CI: GitHub Actions (build/test/lint/fmt on 3 OS, codecov OIDC)
 - Docs: README, CONTRIBUTING, SECURITY, CODE_OF_CONDUCT, AGENTS, llms.txt
 
+[0.3.3]: https://github.com/grpmsoft/daemon/compare/v0.3.2...v0.3.3
+[0.3.2]: https://github.com/grpmsoft/daemon/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/grpmsoft/daemon/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/grpmsoft/daemon/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/grpmsoft/daemon/compare/v0.1.1...v0.2.0
