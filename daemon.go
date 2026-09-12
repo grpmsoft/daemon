@@ -538,14 +538,22 @@ func acquireServeLock(pidPath string) (*pidlock.Lock, error) {
 	}
 
 	// Foreground mode — acquire lock directly.
-	lock, err := pidlock.TryLock(pidPath)
-	if err != nil {
-		if errors.Is(err, pidlock.ErrLocked) {
-			return nil, fmt.Errorf("daemon already running (pid file locked): %w", err)
+	// On Windows, the parent may have just released the PID file lock
+	// (setupExtraFiles). Retry briefly in case of transient contention
+	// from probes (IsHeld, Status) that also use exclusive CreateFile.
+	var lock *pidlock.Lock
+	var err error
+	for range 20 {
+		lock, err = pidlock.TryLock(pidPath)
+		if err == nil {
+			return lock, nil
 		}
-		return nil, fmt.Errorf("acquire pid lock: %w", err)
+		if !errors.Is(err, pidlock.ErrLocked) {
+			return nil, fmt.Errorf("acquire pid lock: %w", err)
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
-	return lock, nil
+	return nil, fmt.Errorf("daemon already running (pid file locked): %w", err)
 }
 
 // waitForIdle blocks until connections drop to zero AND stay zero for the

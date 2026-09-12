@@ -3,9 +3,12 @@
 package daemon
 
 import (
+	"os"
 	"os/exec"
+	"path/filepath"
 	"syscall"
 
+	"github.com/grpmsoft/daemon/internal"
 	"github.com/grpmsoft/daemon/internal/pidlock"
 )
 
@@ -26,8 +29,19 @@ func detachedProcAttr() *syscall.SysProcAttr {
 // via the foreground Serve path (no DAEMON_PIDFD env set).
 // Parent releases its lock before spawn so child can TryLock.
 func setupExtraFiles(_ *exec.Cmd, lock *pidlock.Lock) {
-	// Release parent's lock — child will acquire in Serve foreground path.
-	// This creates a brief window, but startup serialization via EnsureRunning's
-	// TryLock prevents duplicate spawns.
+	// Release PID file lock — child acquires in Serve foreground path.
 	lock.Release()
+}
+
+// acquireStartupLock holds a LockFileEx on <DataDir>/<Name>.lock for the
+// duration of spawn→ready. Prevents another EnsureRunning from entering
+// the spawn path while the PID file lock is released (Windows-specific gap).
+func acquireStartupLock(cfg Config) (*os.File, error) {
+	lockPath := filepath.Join(cfg.DataDir, cfg.Name+".lock")
+	return internal.Lock(lockPath)
+}
+
+// releaseStartupLock releases the Windows startup serialization lock.
+func releaseStartupLock(f *os.File) {
+	internal.Unlock(f)
 }

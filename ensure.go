@@ -47,14 +47,21 @@ func EnsureRunning(ctx context.Context, cfg Config, binary string, args []string
 	// Truncate immediately so concurrent ErrLocked readers never see stale data.
 	_ = lock.WriteData([]byte{})
 
+	// On Windows, acquire a separate startup lock (LockFileEx on .lock file)
+	// to serialize the spawn window where the PID file lock is released.
+	// On Unix this is a no-op (fd inheritance handles serialization).
+	startupLock, slErr := acquireStartupLock(cfg)
+	if slErr != nil {
+		_ = lock.File().Close()
+		return 0, fmt.Errorf("ensure running: startup lock: %w", slErr)
+	}
+	defer releaseStartupLock(startupLock)
+
 	// Start daemon, pass locked fd to child.
 	d := New(cfg)
 
 	port, startErr := d.startWithLock(ctx, binary, args, lock)
 	if startErr != nil {
-		// Close fd only (not LOCK_UN) — if child was spawned and shares the
-		// OFD, LOCK_UN would drop the lock for both. Close is safe: child
-		// keeps the lock via its inherited fd copy.
 		_ = lock.File().Close()
 		return 0, fmt.Errorf("ensure running: start daemon: %w", startErr)
 	}
