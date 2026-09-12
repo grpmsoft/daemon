@@ -6,21 +6,27 @@
 [![Go Version](https://img.shields.io/github/go-mod/go-version/grpmsoft/daemon)](https://github.com/grpmsoft/daemon/blob/main/go.mod)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-**Cross-platform daemon lifecycle library for Go applications.** Pure Go, zero CGO, zero dependencies.
+**Pure-Go on-demand process lifecycle and local IPC layer for shared background services used by CLI tools and agents.**
 
-Manages background daemon processes with HTTP health checks, PID file locking, signal handling, connection tracking, and idle auto-shutdown. Built for tools that need a persistent background server -- MCP servers, language servers, dev tools.
+Zero CGO. Zero dependencies. Cross-platform.
 
-## Features
+Your CLI starts a background process when needed, shares it between multiple clients, and shuts it down when idle. The owner of the process lifetime is **demand**, not an init system.
 
-- **Client mode** -- Start/Stop/Restart/Status to manage a background daemon from any CLI
-- **Server mode** -- `Serve()` runs as a foreground daemon with automatic port selection, PID file, signal handling, and health endpoint
-- **Proxy mode** -- `Proxy()` bridges stdin/stdout to the daemon's HTTP endpoint for MCP/JSON-RPC protocols
-- **EnsureRunning** -- "start if needed" with race-safe PID locking (two agents calling simultaneously is safe)
-- **run.Group** -- actor concurrency pattern (oklog/run reimplemented, zero deps) for composing HTTP server + signal handler + idle timer
-- **Connection tracking** -- atomic connect/disconnect counting with idle auto-shutdown when all clients leave
-- **Rich Model** -- `Daemon` struct depends on interfaces (`PIDStore`, `ProcessManager`, `HealthChecker`), not concrete implementations. Testable by design
-- **Cross-platform** -- Windows (`CREATE_NEW_PROCESS_GROUP`), Linux/macOS (`setsid`) with platform-specific process management in `internal/`
-- **Pure Go** -- no CGO, no assembly, stdlib only
+```
+CLI #1 ──┐
+         │    EnsureRunning
+CLI #2 ──┼──────────────────► daemon process ──► idle ──► shutdown
+         │                        │
+CLI #3 ──┘                   lease tracking
+                            (zero connections
+                              + IdleTimeout)
+```
+
+## Why
+
+MCP servers, language servers, and dev tools need a persistent background process shared by multiple agents. Without lifecycle management, each agent spawns its own instance -- 6 agents x ~1-2 GB gopls = 6-12 GB RAM.
+
+`daemon` solves this with one abstraction: **`EnsureRunning`** -- start if needed, return the port if already running. Race-safe: two agents calling simultaneously never produce two daemons. The loser detects the winner via a kernel-level file lock and returns the same port.
 
 ## Installation
 
@@ -31,157 +37,132 @@ go get github.com/grpmsoft/daemon
 ## Quick Start
 
 ```go
-package main
-
-import (
-    "context"
-    "fmt"
-    "os"
-
-    "github.com/grpmsoft/daemon"
-)
-
-func main() {
-    cfg := daemon.Config{
-        Name:    "myapp",
-        DataDir: ".myapp",
-        Binary:  "", // empty = os.Executable()
-        Args:    []string{"serve"},
-    }
-
-    d := daemon.New(cfg)
-
-    // Start a background daemon.
-    info, err := d.Start(context.Background())
-    if err != nil {
-        fmt.Fprintf(os.Stderr, "start: %v\n", err)
-        os.Exit(1)
-    }
-    fmt.Printf("Started: PID %d, Port %d\n", info.PID, info.Port)
-
-    // Check status.
-    info, _ = d.Status()
-    fmt.Printf("Status: %s, PID: %d, Port: %d\n", info.Status, info.PID, info.Port)
-
-    // Stop the daemon.
-    if err := d.Stop(context.Background()); err != nil {
-        fmt.Fprintf(os.Stderr, "stop: %v\n", err)
-    }
+cfg := daemon.Config{
+    Name:    "myapp",
+    DataDir: ".myapp",
+    Args:    []string{"serve"},
 }
-```
 
-## Server Mode
-
-The spawned process calls `Serve()` to run as the daemon. It picks a free port, writes a PID file, registers a `/health` endpoint, and blocks until shutdown.
-
-```go
-package main
-
-import (
-    "context"
-    "fmt"
-    "net/http"
-    "os"
-    "time"
-
-    "github.com/grpmsoft/daemon"
-)
-
-func main() {
-    cfg := daemon.Config{
-        Name:        "myapp",
-        DataDir:     ".myapp",
-        IdleTimeout: 5 * time.Minute, // auto-shutdown after 5 min idle
-    }
-
-    mux := http.NewServeMux()
-    mux.HandleFunc("GET /api/hello", func(w http.ResponseWriter, r *http.Request) {
-        fmt.Fprintln(w, "hello from daemon")
-    })
-
-    // Blocks until SIGINT/SIGTERM, context cancel, or idle timeout.
-    if err := daemon.Serve(context.Background(), cfg, mux); err != nil {
-        fmt.Fprintf(os.Stderr, "serve: %v\n", err)
-        os.Exit(1)
-    }
-}
-```
-
-`Serve()` uses a `Group` (actor pattern) internally: HTTP server + signal handler + idle timer run as concurrent actors. When any actor returns, all others are interrupted.
-
-## Proxy Mode
-
-`Proxy()` bridges stdin/stdout to the daemon's HTTP endpoint. Reads newline-delimited JSON from stdin, POSTs each message to the daemon, writes responses to stdout. Tracks connections for idle auto-shutdown.
-
-```go
-// In your CLI's "mcp serve" command:
+// Start-if-needed, get port (package-level convenience):
 port, err := daemon.EnsureRunning(ctx, cfg)
-if err != nil {
-    return err
-}
-return daemon.Proxy(ctx, cfg, daemon.ProxyOptions{MCPPath: "/mcp"})
+
+// Or use the method form for full control:
+d := daemon.New(cfg)
+info, err := d.Start(ctx)           // error if already running
+info, err = d.EnsureRunning(ctx)    // idempotent
+info, err = d.Restart(ctx)          // stop + start, one lock
+err = d.Stop(ctx)                   // graceful shutdown
+info, err = d.Status()              // read-only, no lock
 ```
 
-`ProxyOptions` supports custom `Stdin`/`Stdout` (for testing) and `LogPayloads` (opt-in, disabled by default for security).
+All mutating methods serialize on a startup lock. Public methods never call other public methods. Config is immutable after `New()` -- concurrent calls are safe.
 
-## EnsureRunning
+## Three Modes
 
-`EnsureRunning` is the main entry point for consumers. It checks if a daemon is already running and returns its port. If not, it starts a new one and waits for the health check to pass.
+### Client Mode
 
-Available as both a method on `*Daemon` (returns `*Info`) and a package-level convenience function (returns port as `int`):
+Your CLI manages a background daemon:
 
 ```go
-// Package-level convenience (creates a Daemon internally):
-port, err := daemon.EnsureRunning(ctx, daemon.Config{
+d := daemon.New(daemon.Config{
     Name:    "myapp",
     DataDir: ".myapp",
     Args:    []string{"serve"},
 })
-if err != nil {
-    return err
-}
-fmt.Printf("Daemon ready on port %d\n", port)
 
-// Method form (when you already have a Daemon instance):
-d := daemon.New(cfg)
-info, err := d.EnsureRunning(ctx)
+info, err := d.Start(ctx)    // spawn, wait for health
+info, _ := d.Status()        // PID, port, uptime
+d.Stop(ctx)                  // graceful shutdown
 ```
 
-Race-safe: if two agents call `EnsureRunning` simultaneously and one wins the start, the other detects the running daemon via the PID file and returns its port.
+### Server Mode
+
+The spawned process calls `Serve()` to become the daemon. It picks a free port, writes a PID file with a bearer token, registers `/health`, and blocks until shutdown.
+
+```go
+mux := http.NewServeMux()
+mux.HandleFunc("GET /api/hello", func(w http.ResponseWriter, r *http.Request) {
+    fmt.Fprintln(w, "hello from daemon")
+})
+
+daemon.Serve(ctx, daemon.Config{
+    Name:        "myapp",
+    DataDir:     ".myapp",
+    IdleTimeout: 5 * time.Minute,
+}, mux)
+```
+
+`Serve()` uses a `Group` (actor pattern) internally: HTTP server + signal handler + idle timer + shutdown endpoint run as concurrent actors. When any actor returns, all others are interrupted.
+
+### Proxy Mode
+
+`Proxy()` bridges stdin/stdout to the daemon's HTTP endpoint for MCP/JSON-RPC protocols:
+
+```go
+port, _ := daemon.EnsureRunning(ctx, cfg)
+daemon.Proxy(ctx, cfg, daemon.ProxyOptions{MCPPath: "/mcp"})
+```
+
+`ProxyOptions` fields: `MCPPath` (HTTP path, default `"/mcp"`), `Stdin`/`Stdout` (`io.Reader`/`io.Writer` -- replaceable for testing, default `os.Stdin`/`os.Stdout`), `LogPayloads` (opt-in, default `false` -- when enabled, logs request/response bodies to `proxy.log`; disabled by default because payloads may contain sensitive data).
+
+The proxy automatically establishes a lease-based connection to the daemon (see below) and forwards newline-delimited JSON between stdin and the daemon's HTTP endpoint.
+
+## Lease-Based Connection Tracking
+
+The lifetime of a TCP connection **is** the lease. When a proxy process dies -- SIGKILL, OOM, closed terminal -- the kernel closes the socket, the daemon sees the disconnect, and the connection count drops. No heartbeats. No timers. No stray counts from crashed clients.
+
+```
+Proxy process          Daemon
+     │                    │
+     ├── GET /daemon/attach ──► ct.Connect()
+     │         │          │
+     │    TCP alive       │     connection count > 0
+     │    = lease held    │     idle timer blocked
+     │         │          │
+     ╳ SIGKILL            │
+     │                    │
+  kernel closes socket ──► ct.Disconnect()
+                          │
+                     count drops to 0
+                          │
+                     IdleTimeout fires
+                          │
+                     graceful shutdown
+```
+
+Backward compatible: if the daemon predates leases (v0.3.0), the proxy falls back to explicit `POST /daemon/connect` and `POST /daemon/disconnect`.
+
+## Security
+
+`Serve()` generates a bearer token (`crypto/rand`) at startup and stores it in the PID file (`0600` permissions). All `/daemon/*` control-plane endpoints require `Authorization: Bearer <token>`. The `/health` endpoint stays open for external probes.
+
+| Method | Path | Auth | Purpose |
+|--------|------|------|---------|
+| `GET` | `/health` | None | Readiness probe |
+| `GET` | `/daemon/attach` | Bearer | Lease connection (v0.3.1+) |
+| `POST` | `/daemon/connect` | Bearer | Increment connection count. Deprecated: use attach |
+| `POST` | `/daemon/disconnect` | Bearer | Decrement connection count. Deprecated: use attach |
+| `POST` | `/daemon/shutdown` | Bearer | Graceful stop |
+
+DNS rebinding protection: `loopbackGuard` middleware rejects requests with non-loopback `Host` or `Origin` headers. Combined with the bearer token, a page with a rebinding domain that passes the Host check still cannot authenticate.
+
+Set `Config.RequireToken = true` to extend token auth to your application handler (everything outside `/health` and `/daemon/*`).
 
 ## Configuration
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `Name` | `string` | (required) | Application name. Used for PID file naming and health response |
-| `DataDir` | `string` | (required) | Directory for runtime files (PID, logs) |
-| `Binary` | `string` | `os.Executable()` | Executable path for the daemon process. Empty uses current binary |
-| `Args` | `[]string` | `nil` | Arguments passed to the child process in `Start()`/`Restart()` |
-| `Timeout` | `time.Duration` | `30s` | How long `Start()` waits for health check to pass |
+| `Name` | `string` | (required) | Application name, used for PID file naming |
+| `DataDir` | `string` | (required) | Directory for runtime files (PID, logs). Resolved to absolute path |
+| `Binary` | `string` | `os.Executable()` | Executable path for the daemon process |
+| `Args` | `[]string` | `nil` | Arguments passed to the child process |
+| `Dir` | `string` | `DataDir` | Working directory for the spawned daemon |
+| `Timeout` | `time.Duration` | `30s` | How long `Start()` waits for health check |
 | `HealthPath` | `string` | `"/health"` | HTTP path for the health endpoint |
 | `IdleTimeout` | `time.Duration` | `0` (disabled) | Auto-shutdown after this duration with zero connections |
-| `Dir` | `string` | `DataDir` | Working directory for spawned daemon. Prevents holding parent's CWD |
-| `RequireToken` | `bool` | `false` | When true, bearer token required for app handler too |
+| `RequireToken` | `bool` | `false` | Extend bearer token auth to the application handler |
 
-**Note:** `DataDir` will contain a persistent `<Name>.lock` file used to serialize concurrent `EnsureRunning` calls. After a binary upgrade (`go install`), `EnsureRunning` returns the existing daemon's port -- call `Restart()` to pick up the new binary. Set `Binary` and `Args` in Config once; all lifecycle methods (`Start`, `Stop`, `Restart`, `EnsureRunning`) use them automatically.
-
-## Control-Plane Endpoints
-
-`Serve()` registers internal endpoints for lifecycle management. All `/daemon/*` endpoints require a bearer token (generated at startup, stored in the PID file).
-
-| Method | Path | Auth | Purpose |
-|--------|------|------|---------|
-| `GET` | `/health` | None | Health check (used by `WaitUntilReady`) |
-| `GET` | `/daemon/attach` | Bearer | Lease-based connection tracking (v0.3.1+) |
-| `POST` | `/daemon/connect` | Bearer | Increment connection count (deprecated, use attach) |
-| `POST` | `/daemon/disconnect` | Bearer | Decrement connection count (deprecated, use attach) |
-| `POST` | `/daemon/shutdown` | Bearer | Graceful shutdown |
-
-### Lease-Based Connection Tracking
-
-`Proxy()` opens `GET /daemon/attach` and keeps the TCP connection alive for its lifetime. The connection IS the lease -- when the proxy process dies (SIGKILL, OOM, closed terminal), the kernel closes the socket, the connection count drops, and idle auto-shutdown can proceed. No heartbeats, no timers, no stray counts from crashed clients.
-
-If the daemon doesn't support `/daemon/attach` (v0.3.0), the proxy falls back to `POST /daemon/connect` and `POST /daemon/disconnect`.
+Config is normalized at construction time (`New()`). Set `Binary` and `Args` once; all lifecycle methods use them automatically.
 
 ## run.Group
 
@@ -205,37 +186,23 @@ err := g.Run() // blocks until all actors stop
 
 ## Testing
 
-All interfaces (`PIDStore`, `ProcessManager`, `HealthChecker`) are designed for test injection via `NewWithDeps()`:
+All interfaces (`PIDStore`, `ProcessManager`, `HealthChecker`) are designed for test injection:
 
 ```go
 d := daemon.NewWithDeps(cfg, mockPIDStore, mockProcs, mockHealth)
 ```
 
-```bash
-go test ./...
-```
+Integration tests use the helper-process pattern -- no external binaries needed. CI runs with `-race` on Linux, macOS, and Windows.
 
 ## Not a Service Manager
 
-`grpmsoft/daemon` is not a system service manager. If you need a long-lived daemon under systemd, launchd, or Windows SCM, use [kardianos/service](https://github.com/kardianos/service) -- it is the industry standard for that job.
+This library is **not** a replacement for systemd, launchd, or Windows SCM. If you need a long-lived system service, use [kardianos/service](https://github.com/kardianos/service) -- it is the industry standard for that job.
 
-`grpmsoft/daemon` manages a background process **on demand**: your CLI starts it when needed, shares it between clients, and shuts it down when idle. The owner of the process lifetime is **demand**, not an init system. The two libraries complement each other: if you need your tool to be present from boot, run `myapp serve` under kardianos/service and skip `EnsureRunning`.
+The two libraries are complementary: if your tool must be present from boot, run `myapp serve` under kardianos/service and skip `EnsureRunning`. Do not combine `Restart=always` with idle auto-shutdown -- two supervisors will fight.
 
 ## Contributing
 
-Contributions are welcome. Please open an issue or pull request on [GitHub](https://github.com/grpmsoft/daemon).
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for development guidelines and [CHANGELOG.md](CHANGELOG.md) for release history.
-
-## Star History
-
-<a href="https://starhistory.io">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.starhistory.io/png?repos=grpmsoft/daemon&style=dark" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.starhistory.io/png?repos=grpmsoft/daemon&style=professional" />
-   <img alt="Star History Chart" src="https://api.starhistory.io/png?repos=grpmsoft/daemon" width="800" />
- </picture>
-</a>
+Contributions welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines and [CHANGELOG.md](CHANGELOG.md) for release history.
 
 ## License
 
