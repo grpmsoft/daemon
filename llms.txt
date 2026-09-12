@@ -1,6 +1,6 @@
 # daemon
 
-> Cross-platform daemon lifecycle library for Go applications. Pure Go, zero CGO, zero dependencies (stdlib only).
+> Pure-Go on-demand process lifecycle and local IPC layer for shared background services used by CLI tools and agents. Zero CGO, zero dependencies.
 
 Module: github.com/grpmsoft/daemon
 Go: 1.27+
@@ -9,95 +9,84 @@ Organization: grpmsoft (github.com/grpmsoft)
 
 ## Overview
 
-daemon manages background daemon processes with HTTP health checks, PID file locking, signal handling, connection tracking, and idle auto-shutdown. Built for tools that need a persistent background server — MCP servers, language servers, dev tools.
+Your CLI starts a background process when needed, shares it between multiple clients, and shuts it down when idle. The owner of the process lifetime is demand, not an init system.
 
-Three modes: Client mode (Start/Stop/Restart/EnsureRunning/Status — manage a background daemon), Server mode (Serve — run as the foreground daemon with HTTP, PID, signals), and Proxy mode (Proxy — bridge stdin/stdout to daemon HTTP for MCP/JSON-RPC).
+Not a system service manager. For systemd/launchd/SCM use kardianos/service. The two are complementary. Do not mix Restart=always with idle auto-shutdown.
 
-Not a system service manager. For systemd/launchd/SCM use kardianos/service. This library manages on-demand background processes owned by CLI callers: starts when needed, shared between clients, shuts down when idle.
+Three modes: Client (Start/Stop/Restart/EnsureRunning/Status), Server (Serve -- foreground daemon with HTTP, PID, signals, lease, token), Proxy (stdin/stdout ↔ HTTP bridge for MCP/JSON-RPC).
+
+## Core Abstraction
+
+EnsureRunning -- start if needed, return port if already running. Race-safe: two agents calling simultaneously never produce two daemons. Serialized on kernel-level file lock.
+
+Lease-based connection tracking: TCP connection lifetime IS the lease. Client crash → kernel closes socket → count drops → idle shutdown proceeds. No heartbeats, no timers, no stray counts from crashed clients.
 
 ## API
 
-### Core Types
+### Config
 
-- `Daemon` — lifecycle manager. Created via New(Config) or NewWithDeps(Config, PIDStore, ProcessManager, HealthChecker) for testing.
-- `Config` — Name (string), DataDir (string), Binary (string, default os.Executable()), Args ([]string), Timeout (time.Duration, default 30s), HealthPath (string, default "/health"), IdleTimeout (time.Duration, 0=disabled), RequireToken (bool, default false — when true, bearer token required for app handler).
-- `Status` — enum: StatusStopped, StatusStarting, StatusRunning, StatusStopping, StatusError.
-- `Info` — status snapshot: Status, PID, Port, Name, StartTime, Uptime.
-- `Group` — concurrent actor orchestration (oklog/run reimplemented, zero deps). Add(execute, interrupt) pairs; Run() starts all; first return triggers interrupt on all others.
-- `ConnTracker` — atomic connection counter with idle notification channels.
+- Name (string, required) -- application name
+- DataDir (string, required) -- runtime files directory, resolved to absolute
+- Binary (string, default os.Executable()) -- daemon executable
+- Args ([]string) -- arguments for child process
+- Dir (string, default DataDir) -- child working directory
+- Timeout (time.Duration, default 30s) -- health check wait
+- HealthPath (string, default "/health")
+- IdleTimeout (time.Duration, 0=disabled) -- auto-shutdown
+- RequireToken (bool, default false) -- extend bearer auth to app handler
 
-### Interfaces (for testability)
+### Daemon Methods (all return *Info except Stop)
 
-- `PIDStore` — Save, Load, Clear, IsAlive, Path. Abstracts PID file persistence.
-- `ProcessManager` — StartDetached, KillProcess(ctx, pid, grace), IsProcessAlive. Platform-specific process management.
-- `HealthChecker` — Check, WaitUntilReady. HTTP health polling (fixed 500ms interval).
+- Start(ctx) (*Info, error) -- error if already running
+- EnsureRunning(ctx) (*Info, error) -- idempotent
+- Stop(ctx) error -- graceful: HTTP shutdown → force kill
+- Restart(ctx) (*Info, error) -- stop + start, single lock
+- Status() (*Info, error) -- read-only, no lock
+- IsRunning() bool -- read-only, no lock
 
-### Functions
+Config immutable after New(). Concurrent calls safe.
 
-- `New(Config) *Daemon` — create with default implementations.
-- `NewWithDeps(Config, PIDStore, ProcessManager, HealthChecker) *Daemon` — create with mocks for testing.
-- `Serve(ctx, Config, http.Handler) error` — run as daemon: picks free port, generates bearer token (rand.Text), writes PID file (with token), registers /health + /daemon/attach + /daemon/connect + /daemon/disconnect + /daemon/shutdown, blocks until signal/context/idle. All /daemon/* endpoints require bearer token.
-- `EnsureRunning(ctx, Config) (port int, err error)` — package-level convenience. Creates Daemon internally, returns port. Race-safe PID locking.
-- `Proxy(ctx, cfg Config, opts ProxyOptions) error` — bridge io.Reader/Writer to daemon HTTP endpoint. Tries lease-based attach first (GET /daemon/attach), falls back to connect/disconnect for v0.3.0 daemons. Reads bearer token from PID file. Checks IsHeld before dialing (returns ErrNotRunning for dead daemons).
+### Package Functions
 
-### Daemon Methods
+- New(Config) *Daemon -- create with defaults
+- NewWithDeps(Config, PIDStore, ProcessManager, HealthChecker) *Daemon -- test injection
+- EnsureRunning(ctx, Config) (int, error) -- convenience wrapper
+- Serve(ctx, Config, http.Handler) error -- server mode
+- Proxy(ctx, Config, ProxyOptions) error -- stdin/stdout bridge
 
-- `Start(ctx) (*Info, error)` — spawn detached background process (Binary/Args from Config), wait for health check. Returns error if already running.
-- `EnsureRunning(ctx) (*Info, error)` — idempotent start-if-needed. Returns existing *Info if daemon is running.
-- `Stop(ctx) error` — graceful stop serialized on startup lock: HTTP /daemon/shutdown → wait → fallback to kill. Idempotent (returns nil if not running).
-- `Restart(ctx) (*Info, error)` — stop + start under one lock acquisition.
-- `Status() (*Info, error)` — read-only, no lock. Reads PID file, checks process liveness, returns status snapshot.
-- `IsRunning() bool` — read-only, no lock. Quick check via PID file.
+### Interfaces
 
-All mutating methods serialize on the startup lock. Read-only methods (Status, IsRunning) do not acquire the lock.
+- PIDStore -- Save, Load, Clear, IsAlive, Path
+- ProcessManager -- StartDetached, KillProcess(ctx, pid, grace), IsProcessAlive
+- HealthChecker -- Check, WaitUntilReady
 
-## Usage Patterns
+### Security
 
-### Client Mode
-```go
-cfg := daemon.Config{Name: "myapp", DataDir: ".myapp", Args: []string{"serve"}}
-d := daemon.New(cfg)
-info, err := d.Start(ctx)   // spawns detached process, waits for health, returns *Info
-info, _ = d.Status()         // reads PID file, checks process (no lock)
-d.Stop(ctx)                  // graceful shutdown (serialized on lock)
-```
-
-### Server Mode
-```go
-daemon.Serve(ctx, daemon.Config{
-    Name:        "myapp",
-    DataDir:     ".myapp",
-    IdleTimeout: 5 * time.Minute,
-}, httpHandler) // blocks until shutdown
-```
-
-### Proxy Mode (MCP/JSON-RPC bridge)
-```go
-port, _ := daemon.EnsureRunning(ctx, cfg) // Binary and Args are in cfg
-daemon.Proxy(ctx, cfg, daemon.ProxyOptions{MCPPath: "/mcp"}) // stdin/stdout ↔ HTTP
-```
+Bearer token (crypto/rand) in PID file (0600). /daemon/* requires Authorization: Bearer. /health open. DNS rebinding: loopbackGuard + token.
 
 ## File Structure
 
 ```
-daemon.go        — Daemon struct, Start/Stop/Restart/EnsureRunning/Status/Serve, ConnTracker
-                   Internal: acquireStartupLock, startLocked, stopLocked, buildInfo
-config.go        — Config (with Binary, Args), Status enum, Info, interfaces (PIDStore, ProcessManager, HealthChecker)
-group.go         — Group: concurrent actor orchestration
-proxy.go         — Proxy: stdin/stdout to HTTP bridge + IsHeld pre-check
-ensure.go        — EnsureRunning (package-level wrapper): start-if-needed with race handling
-defaults.go      — Default interface implementations
+daemon.go        — Daemon, Start/Stop/Restart/EnsureRunning/Status,
+                   acquireStartupLock/startLocked/stopLocked/buildInfo,
+                   Serve, ConnTracker, /daemon/attach, authGuard, loopbackGuard
+config.go        — Config, Status, Info, PIDInfo, interfaces
+group.go         — Group (oklog/run actor pattern, zero deps)
+proxy.go         — Proxy, proxyAttach (lease + fallback), IsHeld pre-check
+ensure.go        — EnsureRunning (package wrapper), waitForPort
+defaults.go      — Default implementations
+errors.go        — Sentinel errors
 internal/
-  pidlock/       — Cross-platform lock primitive (TryLock, Release, WriteData, ReadLocked, IsHeld, InheritFD)
-  process.go     — Cross-platform process utilities (IsProcessAlive, KillProcess(ctx, pid, grace))
-  process_unix.go    — Unix: StartDetached via os.StartProcess with Setsid
-  process_windows.go — Windows: StartDetached via CREATE_NEW_PROCESS_GROUP
-  health.go      — HTTP health check polling (fixed 500ms interval)
+  pidlock/       — Cross-platform lock (flock/share-mode)
+  pidfile.go     — PID file JSON persistence
+  process_*.go   — Platform-specific process management
+  health.go      — HTTP health polling
+  lock_*.go      — ctx-aware startup lock
 ```
 
-## Optional
+## Links
 
-- [README](https://github.com/grpmsoft/daemon/blob/main/README.md): full documentation with examples
-- [AGENTS.md](https://github.com/grpmsoft/daemon/blob/main/AGENTS.md): AI assistant guide
-- [CONTRIBUTING.md](https://github.com/grpmsoft/daemon/blob/main/CONTRIBUTING.md): contribution guidelines
-- [pkg.go.dev](https://pkg.go.dev/github.com/grpmsoft/daemon): API reference
+- [README](https://github.com/grpmsoft/daemon/blob/main/README.md)
+- [AGENTS.md](https://github.com/grpmsoft/daemon/blob/main/AGENTS.md)
+- [CONTRIBUTING.md](https://github.com/grpmsoft/daemon/blob/main/CONTRIBUTING.md)
+- [pkg.go.dev](https://pkg.go.dev/github.com/grpmsoft/daemon)
