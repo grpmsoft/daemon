@@ -8,6 +8,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/grpmsoft/daemon/internal/pidlock"
 )
 
 func TestPIDFile_Path(t *testing.T) {
@@ -229,7 +231,29 @@ func TestPIDFile_Clear_NonExistentFile(t *testing.T) {
 	}
 }
 
-func TestPIDFile_IsAlive_CurrentProcess(t *testing.T) {
+func TestPIDFile_IsAlive_WithLock(t *testing.T) {
+	dir := t.TempDir()
+	pf := NewPIDFile(dir, "app")
+
+	// Save PID data first.
+	err := pf.Save(os.Getpid(), 1234, "app", "", time.Now())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// IsAlive is now based on pidlock.IsHeld — must hold the lock.
+	lock, lockErr := pidlock.TryLock(pf.Path())
+	if lockErr != nil {
+		t.Fatalf("TryLock: %v", lockErr)
+	}
+	defer lock.Release()
+
+	if !pf.IsAlive() {
+		t.Error("IsAlive must return true when PID file is locked")
+	}
+}
+
+func TestPIDFile_IsAlive_WithoutLock(t *testing.T) {
 	dir := t.TempDir()
 	pf := NewPIDFile(dir, "app")
 
@@ -238,8 +262,9 @@ func TestPIDFile_IsAlive_CurrentProcess(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if !pf.IsAlive() {
-		t.Error("current process PID should be alive")
+	// Without lock held, IsAlive must return false even if PID is valid.
+	if pf.IsAlive() {
+		t.Error("IsAlive must return false when PID file is NOT locked")
 	}
 }
 
@@ -434,19 +459,25 @@ func TestPIDFile_IsAlive_WrongBinary_ReturnsFalse(t *testing.T) {
 	_ = pf.IsAlive()
 }
 
-func TestPIDFile_IsAlive_NoBinary_SkipsVerification(t *testing.T) {
+func TestPIDFile_IsAlive_LockReleasedMeansNotAlive(t *testing.T) {
 	dir := t.TempDir()
 	pf := NewPIDFile(dir, "app")
 
-	// Save with empty binary — verification must be skipped.
 	err := pf.Save(os.Getpid(), 1234, "app", "", time.Now())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// With no binary stored, IsAlive should rely on PID-only check.
-	if !pf.IsAlive() {
-		t.Error("IsAlive must return true for current PID when binary is empty (no verification)")
+	// Acquire and release lock — simulates daemon exit.
+	lock, lockErr := pidlock.TryLock(pf.Path())
+	if lockErr != nil {
+		t.Fatalf("TryLock: %v", lockErr)
+	}
+	lock.Release()
+
+	// After release, IsAlive must be false — daemon exited.
+	if pf.IsAlive() {
+		t.Error("IsAlive must return false after lock is released (daemon exited)")
 	}
 }
 

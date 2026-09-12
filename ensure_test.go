@@ -2,35 +2,45 @@ package daemon
 
 import (
 	"context"
+	"encoding/json/v2"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/grpmsoft/daemon/internal/pidlock"
 )
 
-// EnsureRunning uses New() internally, so we test it via the real PIDFile mechanism
-// by writing a PID file into a temp DataDir before calling EnsureRunning.
+// EnsureRunning uses pidlock.TryLock internally. Tests must hold a lock
+// on the PID file to simulate a running daemon.
 
 // TestEnsureRunning_AlreadyRunning_ReturnsFastPath verifies that EnsureRunning
-// returns the port from the existing PID file when the daemon is alive.
+// returns the port from the PID file when the lock is held (daemon alive).
 func TestEnsureRunning_AlreadyRunning_ReturnsFastPath(t *testing.T) {
 	dir := t.TempDir()
 	cfg := Config{Name: "testapp", DataDir: dir}
+	pidPath := filepath.Join(dir, "testapp.pid")
 
-	// Pre-write a PID file with the current process's PID so IsAlive → true.
-	store := newDefaultPIDStore(dir, "testapp")
-	err := store.Save(os.Getpid(), 9876, "testapp", "", time.Now())
+	// Acquire lock and write PID data — simulates a running daemon.
+	lock, err := pidlock.TryLock(pidPath)
 	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+		t.Fatalf("TryLock: %v", err)
+	}
+	defer lock.Release()
+
+	pidData := PIDInfo{PID: os.Getpid(), Port: 9876, Name: "testapp", StartTime: time.Now()}
+	data, _ := json.Marshal(pidData)
+	if err := lock.WriteData(data); err != nil {
+		t.Fatalf("WriteData: %v", err)
 	}
 
-	port, err := EnsureRunning(context.Background(), cfg, "/usr/bin/app", nil)
-
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	port, ensureErr := EnsureRunning(context.Background(), cfg, "/usr/bin/app", nil)
+	if ensureErr != nil {
+		t.Fatalf("unexpected error: %v", ensureErr)
 	}
 	if port != 9876 {
-		t.Errorf("EnsureRunning must return the port from the existing PID file, got %v, want %v", port, 9876)
+		t.Errorf("EnsureRunning must return port from PID file, got %v, want 9876", port)
 	}
 }
 

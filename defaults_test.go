@@ -186,9 +186,10 @@ func TestDefaultPIDStoreAdapter_SaveLoadClear(t *testing.T) {
 		t.Errorf("got %v, want %v", data.StartTime, startTime)
 	}
 
-	// IsAlive with current PID → true.
-	if !store.IsAlive() {
-		t.Error("expected true, got false")
+	// IsAlive requires pidlock held (v0.2.0 — lock-based identity).
+	// Without lock, IsAlive must be false even with valid PID.
+	if store.IsAlive() {
+		t.Error("IsAlive must be false without lock held")
 	}
 
 	// Clear.

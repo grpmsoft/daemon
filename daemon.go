@@ -23,11 +23,14 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"sync/atomic"
 	"syscall"
 	"time"
+
+	"github.com/grpmsoft/daemon/internal/pidlock"
 )
 
 // Daemon manages a background daemon process.
@@ -111,6 +114,61 @@ func (d *Daemon) Start(ctx context.Context, binary string, args []string) error 
 	}
 
 	return nil
+}
+
+// startWithLock starts a daemon child process with the locked PID file fd
+// passed via ExtraFiles. The child inherits the lock — no window where the
+// lock is released. Returns the port the daemon is listening on.
+func (d *Daemon) startWithLock(ctx context.Context, binary string, args []string, lock *pidlock.Lock) (int, error) {
+	if err := os.MkdirAll(d.cfg.DataDir, 0o750); err != nil {
+		return 0, fmt.Errorf("create data dir %s: %w", d.cfg.DataDir, err)
+	}
+
+	logFile := filepath.Join(d.cfg.DataDir, d.cfg.Name+".log")
+
+	var logF *os.File
+	if logFile != "" {
+		var err error
+		logF, err = os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600) //nolint:gosec // trusted path
+		if err != nil {
+			return 0, fmt.Errorf("open log file %s: %w", logFile, err)
+		}
+		defer func() { _ = logF.Close() }()
+	}
+
+	cmd := exec.Command(binary, args...) //nolint:gosec // binary from trusted caller
+	cmd.Stdout = logF
+	cmd.Stderr = logF
+	cmd.SysProcAttr = detachedProcAttr()
+	cmd.ExtraFiles = []*os.File{lock.File()} // fd 3 in child
+	cmd.Env = append(os.Environ(),
+		"DAEMON_MODE=1",
+		fmt.Sprintf("DAEMON_DATA_DIR=%s", d.cfg.DataDir),
+		"DAEMON_PIDFD=3",
+	)
+
+	if err := cmd.Start(); err != nil {
+		return 0, fmt.Errorf("start daemon %s: %w", d.cfg.Name, err)
+	}
+
+	pid := cmd.Process.Pid
+	// Reaper goroutine prevents zombie (Unix). Windows has no zombies.
+	go func() { _ = cmd.Wait() }()
+
+	if err := d.waitForPIDFile(ctx, pid); err != nil {
+		return 0, fmt.Errorf("daemon %s started (pid %d) but did not become ready: %w", d.cfg.Name, pid, err)
+	}
+
+	data, loadErr := d.pids.Load()
+	if loadErr != nil {
+		return 0, fmt.Errorf("daemon %s started but pid file unreadable: %w", d.cfg.Name, loadErr)
+	}
+
+	if err := d.health.WaitUntilReady(data.Port, d.cfg.HealthPath, d.cfg.Timeout); err != nil {
+		return 0, fmt.Errorf("daemon %s health check failed: %w", d.cfg.Name, err)
+	}
+
+	return data.Port, nil
 }
 
 func (d *Daemon) waitForPIDFile(ctx context.Context, expectedPID int) error {
