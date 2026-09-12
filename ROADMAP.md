@@ -1,9 +1,9 @@
 # Roadmap
 
-## Current State: v0.3.0
+## Current State: v0.3.1
 
-Cross-platform daemon lifecycle library with unified lock protocol (ADR-002).
-All lifecycle mutations serialize on startup lock. One internal path, two public semantics.
+Cross-platform daemon lifecycle library with unified lock protocol (ADR-002),
+lease-based connection tracking (ADR-003), and control-plane bearer token.
 
 ### What works
 
@@ -14,15 +14,15 @@ All lifecycle mutations serialize on startup lock. One internal path, two public
 - Binary/Args in Config — daemon identity per-config, not per-call
 - All mutating methods return *Info (pid, port, start time)
 - Graceful stop: HTTP /daemon/shutdown → clean exit on all platforms
-- Connection tracking with idle auto-shutdown
+- Lease-based connection tracking: GET /daemon/attach — TCP lease, crash-safe (ADR-003)
+- Bearer token on /daemon/* endpoints — PID file 0600 as auth boundary (ADR-003)
+- Backward compat: connect/disconnect still work, token optional for old daemons
 - Orphan child killed on start failure
 - Cross-platform: Windows (share-mode), Linux/macOS (flock), BSD (flock)
-- CI: Node 24 actions, Dependabot, pinned golangci-lint
+- CI: Node 24 actions, Dependabot
 
 ## v0.4.0 — Hardening
 
-- [ ] Token auth for `/daemon/*` endpoints (nonce in PID file, `Authorization: Bearer`)
-- [ ] Lease-based connection tracking (crash-safe, replaces counting)
 - [ ] `slog.Logger` in Config (replace `fmt.Fprintf(os.Stderr)`)
 - [ ] Pipe handshake parent→child (JSON, replaces env vars)
 - [ ] Upgrade detection: binary version in PID file, auto-restart on change
