@@ -103,6 +103,8 @@ port, _ := daemon.EnsureRunning(ctx, cfg)
 daemon.Proxy(ctx, cfg, daemon.ProxyOptions{MCPPath: "/mcp"})
 ```
 
+`ProxyOptions` fields: `MCPPath` (HTTP path, default `"/mcp"`), `Stdin`/`Stdout` (`io.Reader`/`io.Writer` -- replaceable for testing, default `os.Stdin`/`os.Stdout`), `LogPayloads` (opt-in, default `false` -- when enabled, logs request/response bodies to `proxy.log`; disabled by default because payloads may contain sensitive data).
+
 The proxy automatically establishes a lease-based connection to the daemon (see below) and forwards newline-delimited JSON between stdin and the daemon's HTTP endpoint.
 
 ## Lease-Based Connection Tracking
@@ -137,7 +139,9 @@ Backward compatible: if the daemon predates leases (v0.3.0), the proxy falls bac
 | Method | Path | Auth | Purpose |
 |--------|------|------|---------|
 | `GET` | `/health` | None | Readiness probe |
-| `GET` | `/daemon/attach` | Bearer | Lease connection |
+| `GET` | `/daemon/attach` | Bearer | Lease connection (v0.3.1+) |
+| `POST` | `/daemon/connect` | Bearer | Increment connection count. Deprecated: use attach |
+| `POST` | `/daemon/disconnect` | Bearer | Decrement connection count. Deprecated: use attach |
 | `POST` | `/daemon/shutdown` | Bearer | Graceful stop |
 
 DNS rebinding protection: `loopbackGuard` middleware rejects requests with non-loopback `Host` or `Origin` headers. Combined with the bearer token, a page with a rebinding domain that passes the Host check still cannot authenticate.
@@ -199,16 +203,6 @@ The two libraries are complementary: if your tool must be present from boot, run
 ## Contributing
 
 Contributions welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines and [CHANGELOG.md](CHANGELOG.md) for release history.
-
-## Star History
-
-<a href="https://starhistory.io">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.starhistory.io/png?repos=grpmsoft/daemon&style=dark" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.starhistory.io/png?repos=grpmsoft/daemon&style=professional" />
-   <img alt="Star History Chart" src="https://api.starhistory.io/png?repos=grpmsoft/daemon" width="800" />
- </picture>
-</a>
 
 ## License
 
