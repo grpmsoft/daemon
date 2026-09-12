@@ -32,45 +32,58 @@ func EnsureRunning(ctx context.Context, cfg Config, binary string, args []string
 
 	pidPath := filepath.Join(cfg.DataDir, cfg.Name+".pid")
 
-	// Try to acquire the PID file lock.
-	lock, err := pidlock.TryLock(pidPath)
-	if errors.Is(err, pidlock.ErrLocked) {
-		// Lock held = daemon running OR another EnsureRunning is spawning.
-		// Poll until valid PID data appears (child writes after Serve starts).
-		return waitForPort(ctx, pidPath, cfg.Timeout)
-	}
-	if err != nil {
-		return 0, fmt.Errorf("ensure running: %w", err)
-	}
+	for {
+		// Try to acquire the PID file lock.
+		lock, err := pidlock.TryLock(pidPath)
+		if errors.Is(err, pidlock.ErrLocked) {
+			// Lock held = daemon running OR another EnsureRunning spawning.
+			// Poll until valid PID data appears OR lock becomes free (N12: holder died).
+			port, waitErr := waitForPort(ctx, pidPath, cfg.Timeout)
+			if waitErr == nil {
+				return port, nil
+			}
+			// If lock freed (holder died), retry the outer loop to become starter.
+			if errors.Is(waitErr, errRetryAsStarter) {
+				continue
+			}
+			return 0, waitErr
+		}
+		if err != nil {
+			return 0, fmt.Errorf("ensure running: %w", err)
+		}
 
-	// We hold the lock — no daemon is running.
-	// Truncate immediately so concurrent ErrLocked readers never see stale data.
-	_ = lock.WriteData([]byte{})
+		// We hold the lock — no daemon is running.
+		// Truncate immediately so concurrent ErrLocked readers never see stale data.
+		_ = lock.WriteData([]byte{})
 
-	// On Windows, acquire a separate startup lock (LockFileEx on .lock file)
-	// to serialize the spawn window where the PID file lock is released.
-	// On Unix this is a no-op (fd inheritance handles serialization).
-	startupLock, slErr := acquireStartupLock(cfg)
-	if slErr != nil {
+		// On Windows, acquire a separate startup lock (LockFileEx) to serialize
+		// the spawn window. On Unix this is a no-op (fd inheritance handles it).
+		startupLock, slErr := acquireStartupLock(cfg)
+		if slErr != nil {
+			_ = lock.File().Close()
+			return 0, fmt.Errorf("ensure running: startup lock: %w", slErr)
+		}
+		defer releaseStartupLock(startupLock)
+
+		// Start daemon, pass locked fd to child.
+		d := New(cfg)
+
+		port, startErr := d.startWithLock(ctx, binary, args, lock)
+		if startErr != nil {
+			_ = lock.File().Close()
+			return 0, fmt.Errorf("ensure running: start daemon: %w", startErr)
+		}
+
+		// Parent closes its fd — child holds the lock via inherited fd.
 		_ = lock.File().Close()
-		return 0, fmt.Errorf("ensure running: startup lock: %w", slErr)
+
+		return port, nil
 	}
-	defer releaseStartupLock(startupLock)
-
-	// Start daemon, pass locked fd to child.
-	d := New(cfg)
-
-	port, startErr := d.startWithLock(ctx, binary, args, lock)
-	if startErr != nil {
-		_ = lock.File().Close()
-		return 0, fmt.Errorf("ensure running: start daemon: %w", startErr)
-	}
-
-	// Parent closes its fd — child holds the lock via inherited fd.
-	_ = lock.File().Close()
-
-	return port, nil
 }
+
+// errRetryAsStarter is an internal sentinel: waitForPort detected the lock
+// holder died and the caller should retry as the new starter.
+var errRetryAsStarter = errors.New("internal: retry as starter")
 
 // waitForPort polls the PID file until it contains a valid port or ctx expires.
 // Used when TryLock returns ErrLocked — another instance holds the lock
@@ -98,13 +111,10 @@ func waitForPort(ctx context.Context, pidPath string, timeout time.Duration) (in
 		}
 
 		// N12: if the holder died (parent crashed after truncate), the lock
-		// is now free. Try to acquire it — if we get it, WE become the starter.
-		if lock, tryErr := pidlock.TryLock(pidPath); tryErr == nil {
-			// Lock is free — previous holder died. Return sentinel so caller
-			// can restart the spawn. For now, release and return timeout
-			// (caller will retry EnsureRunning on next call).
-			lock.Release()
-			return 0, fmt.Errorf("ensure running: %w: holder died during spawn", ErrStartTimeout)
+		// is now free. Signal caller to retry as the new starter.
+		if probe, tryErr := pidlock.TryLock(pidPath); tryErr == nil {
+			probe.Release()
+			return 0, errRetryAsStarter
 		}
 
 		time.Sleep(100 * time.Millisecond)
