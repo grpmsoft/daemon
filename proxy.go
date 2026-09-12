@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json/v2"
 	"fmt"
 	"io"
 	"log"
@@ -11,6 +12,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/grpmsoft/daemon/internal/pidlock"
 )
 
 // ProxyOptions configures the Proxy behavior.
@@ -55,7 +58,7 @@ func Proxy(ctx context.Context, cfg Config, opts ProxyOptions) error {
 	cfg.applyDefaults()
 	opts.applyDefaults()
 
-	port, err := readPortFromPIDFile(filepath.Join(cfg.DataDir, cfg.Name+".pid"))
+	port, err := readPort(filepath.Join(cfg.DataDir, cfg.Name+".pid"))
 	if err != nil {
 		return fmt.Errorf("proxy: %w", err)
 	}
@@ -139,6 +142,21 @@ func truncate(b []byte, limit int) string {
 		return string(b)
 	}
 	return string(b[:limit]) + "..."
+}
+
+func readPort(pidPath string) (int, error) {
+	data, err := pidlock.ReadLocked(pidPath)
+	if err != nil {
+		return 0, fmt.Errorf("read pid file: %w", err)
+	}
+	var info PIDInfo
+	if err := json.Unmarshal(data, &info); err != nil {
+		return 0, fmt.Errorf("parse pid file: %w", err)
+	}
+	if info.Port <= 0 {
+		return 0, fmt.Errorf("daemon running but port is %d", info.Port)
+	}
+	return info.Port, nil
 }
 
 func proxyLogger(cfg Config) *log.Logger {
