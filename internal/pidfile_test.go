@@ -482,36 +482,5 @@ func TestBinaryPathsEqual(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Tests: Compare-and-delete in PID file (V2 regression)
-// ---------------------------------------------------------------------------
-
-func TestPIDFile_CompareAndDelete_DifferentPID(t *testing.T) {
-	dir := t.TempDir()
-	pf := NewPIDFile(dir, "test")
-
-	// Simulate: daemon A wrote PID file, daemon B (orphan) tries to clear it.
-	if err := pf.Save(12345, 8080, "test", "/usr/bin/app", time.Now()); err != nil {
-		t.Fatalf("Save: %v", err)
-	}
-
-	// Load returns daemon A's PID.
-	data, err := pf.Load()
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if data.PID != 12345 {
-		t.Fatalf("PID = %d, want 12345", data.PID)
-	}
-
-	// Orphan daemon B (PID 99999) should NOT clear A's PID file.
-	// This verifies the Serve() compare-and-delete pattern.
-	if data.PID == 99999 {
-		t.Fatal("PID file should belong to daemon A, not B")
-	}
-
-	// After skipping clear, file still exists.
-	if _, err := os.Stat(pf.Path()); os.IsNotExist(err) {
-		t.Error("PID file should still exist")
-	}
-}
+// Compare-and-delete tests moved to serve_test.go (TestServe_CompareAndDelete_*)
+// where they test the actual Serve() behavior, not just PIDFile methods.
