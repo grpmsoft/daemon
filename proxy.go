@@ -13,44 +13,78 @@ import (
 	"time"
 )
 
-// Proxy bridges stdin/stdout to an HTTP endpoint on the daemon.
-// Used by "gode mcp serve" to proxy MCP JSON-RPC through stdio to the shared daemon.
+// ProxyOptions configures the Proxy behavior.
+type ProxyOptions struct {
+	// MCPPath is the HTTP path on the daemon to POST JSON-RPC messages to.
+	// Default: "/mcp".
+	MCPPath string
+
+	// Stdin is the input reader for JSON-RPC messages. Default: os.Stdin.
+	Stdin io.Reader
+
+	// Stdout is the output writer for JSON-RPC responses. Default: os.Stdout.
+	Stdout io.Writer
+
+	// LogPayloads enables logging of request/response bodies (first 500 bytes).
+	// Default: false (only method/id/size/latency logged for security — S3).
+	LogPayloads bool
+}
+
+func (o *ProxyOptions) applyDefaults() {
+	if o.MCPPath == "" {
+		o.MCPPath = "/mcp"
+	}
+	if o.Stdin == nil {
+		o.Stdin = os.Stdin
+	}
+	if o.Stdout == nil {
+		o.Stdout = os.Stdout
+	}
+}
+
+// Proxy bridges an input stream to the daemon's HTTP endpoint.
+// Reads newline-delimited JSON-RPC from opts.Stdin, POSTs each to the daemon,
+// writes responses to opts.Stdout.
 //
-// Protocol: reads complete JSON-RPC messages from stdin (newline-delimited JSON),
-// POSTs each to http://127.0.0.1:{port}{mcpPath}, writes responses to stdout.
+// Connection tracking: signals /daemon/connect on start and /daemon/disconnect
+// on exit (only if connect succeeded — prevents stray decrements).
 //
-// Connection tracking: on start, POSTs /daemon/connect to increment the daemon's
-// active connection count. On exit (EOF or error), POSTs /daemon/disconnect to
-// decrement it. This enables the daemon's idle auto-shutdown feature.
-//
-// Exits cleanly on EOF (stdin closed = agent disconnected, daemon stays).
-// Returns error on connection refused (daemon died).
-func Proxy(ctx context.Context, port int, mcpPath string) error {
-	baseURL := fmt.Sprintf("http://127.0.0.1:%d%s", port, mcpPath)
+// Respects ctx for cancellation. Uses context-based timeouts instead of
+// hardcoded http.Client.Timeout.
+func Proxy(ctx context.Context, cfg Config, opts ProxyOptions) error {
+	cfg.applyDefaults()
+	opts.applyDefaults()
+
+	port, err := readPortFromPIDFile(filepath.Join(cfg.DataDir, cfg.Name+".pid"))
+	if err != nil {
+		return fmt.Errorf("proxy: %w", err)
+	}
+
+	baseURL := fmt.Sprintf("http://127.0.0.1:%d%s", port, opts.MCPPath)
 	daemonBase := fmt.Sprintf("http://127.0.0.1:%d", port)
 
-	// Log to file for debugging (stderr may be closed by Claude Code).
-	plog := proxyLogger(port)
+	plog := proxyLogger(cfg)
 
-	client := &http.Client{
-		Timeout: 120 * time.Second,
-	}
+	// No hardcoded Timeout — use ctx for deadline control.
+	client := &http.Client{}
+
+	// Short-timeout client for control calls (connect/disconnect).
+	controlClient := &http.Client{Timeout: 5 * time.Second}
 
 	plog.Printf("proxy started, target=%s", baseURL)
 
-	connected := signalConnect(ctx, client, daemonBase)
+	connected := signalConnect(ctx, controlClient, daemonBase)
 	defer func() {
 		if connected {
 			plog.Printf("proxy stopping, sending disconnect")
-			signalDisconnect(client, daemonBase)
+			signalDisconnect(controlClient, daemonBase)
 		}
 	}()
 
-	scanner := bufio.NewScanner(os.Stdin)
-	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	reader := bufio.NewReaderSize(opts.Stdin, 64*1024)
 
 	msgCount := 0
-	for scanner.Scan() {
+	for {
 		select {
 		case <-ctx.Done():
 			plog.Printf("context done after %d messages", msgCount)
@@ -58,42 +92,46 @@ func Proxy(ctx context.Context, port int, mcpPath string) error {
 		default:
 		}
 
-		line := scanner.Bytes()
+		line, err := reader.ReadBytes('\n')
+		if err != nil {
+			if err == io.EOF {
+				plog.Printf("EOF after %d messages", msgCount)
+				return nil
+			}
+			plog.Printf("read error: %v", err)
+			return fmt.Errorf("read stdin: %w", err)
+		}
+
 		if len(bytes.TrimSpace(line)) == 0 {
 			continue
 		}
 
 		msgCount++
-		plog.Printf("msg #%d REQ len=%d body=%s", msgCount, len(line), truncate(line, 500))
-
-		resp, statusCode, err := proxyRequest(ctx, client, baseURL, line)
-		if err != nil {
-			plog.Printf("msg #%d ERROR: %v", msgCount, err)
-			return fmt.Errorf("proxy to %s: %w", baseURL, err)
+		if opts.LogPayloads {
+			plog.Printf("msg #%d REQ len=%d body=%s", msgCount, len(line), truncate(line, 500))
 		}
 
-		plog.Printf("msg #%d RESP status=%d len=%d body=%s", msgCount, statusCode, len(resp), truncate(resp, 500))
+		resp, statusCode, reqErr := proxyRequest(ctx, client, baseURL, line)
+		if reqErr != nil {
+			plog.Printf("msg #%d ERROR: %v", msgCount, reqErr)
+			return fmt.Errorf("proxy to %s: %w", baseURL, reqErr)
+		}
+
+		if opts.LogPayloads {
+			plog.Printf("msg #%d RESP status=%d len=%d body=%s", msgCount, statusCode, len(resp), truncate(resp, 500))
+		}
 
 		if statusCode == 204 || len(resp) == 0 {
 			continue
 		}
 
-		if _, writeErr := os.Stdout.Write(resp); writeErr != nil {
+		// Write response + newline in one call for NDJSON framing.
+		resp = append(bytes.TrimRight(resp, " \t\r\n"), '\n')
+		if _, writeErr := opts.Stdout.Write(resp); writeErr != nil {
 			plog.Printf("msg #%d stdout write error: %v", msgCount, writeErr)
 			return fmt.Errorf("write response to stdout: %w", writeErr)
 		}
-		if _, writeErr := os.Stdout.Write([]byte("\n")); writeErr != nil {
-			return fmt.Errorf("write newline to stdout: %w", writeErr)
-		}
 	}
-
-	if err := scanner.Err(); err != nil {
-		plog.Printf("scanner error: %v", err)
-		return fmt.Errorf("read stdin: %w", err)
-	}
-
-	plog.Printf("EOF after %d messages", msgCount)
-	return nil
 }
 
 func truncate(b []byte, limit int) string {
@@ -103,21 +141,15 @@ func truncate(b []byte, limit int) string {
 	return string(b[:limit]) + "..."
 }
 
-func proxyLogger(port int) *log.Logger {
-	dataDir := os.Getenv("DAEMON_DATA_DIR")
-	if dataDir == "" {
-		dataDir = ".gode"
-	}
-	logPath := filepath.Join(dataDir, "proxy.log")
-	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600) //nolint:gosec // logPath is constructed from DAEMON_DATA_DIR env var + fixed filename
+func proxyLogger(cfg Config) *log.Logger {
+	logPath := filepath.Join(cfg.DataDir, "proxy.log")
+	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600) //nolint:gosec // logPath from Config.DataDir
 	if err != nil {
 		return log.New(io.Discard, "", 0)
 	}
-	return log.New(f, fmt.Sprintf("[proxy:%d] ", port), log.LstdFlags)
+	return log.New(f, fmt.Sprintf("[proxy:%s] ", cfg.Name), log.LstdFlags)
 }
 
-// signalConnect notifies the daemon that a new proxy connection is active.
-// Best-effort: errors are silently ignored (daemon may be an older version).
 func signalConnect(ctx context.Context, client *http.Client, daemonBase string) bool {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, daemonBase+"/daemon/connect", nil)
 	if err != nil {
@@ -131,12 +163,10 @@ func signalConnect(ctx context.Context, client *http.Client, daemonBase string) 
 	return resp.StatusCode < 300
 }
 
-// signalDisconnect notifies the daemon that a proxy connection has ended.
-// Best-effort: errors are silently ignored. Uses a background context because
-// the original ctx may already be cancelled at defer time.
-// Must only be called if signalConnect returned true.
 func signalDisconnect(client *http.Client, daemonBase string) {
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, daemonBase+"/daemon/disconnect", nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, daemonBase+"/daemon/disconnect", nil)
 	if err != nil {
 		return
 	}
@@ -147,7 +177,6 @@ func signalDisconnect(client *http.Client, daemonBase string) {
 	_ = resp.Body.Close()
 }
 
-// proxyRequest POSTs a single JSON-RPC message to the daemon and returns the response body.
 func proxyRequest(ctx context.Context, client *http.Client, url string, body []byte) ([]byte, int, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {

@@ -142,44 +142,9 @@ func TestProxyRequest_ContextCancelled_ReturnsError(t *testing.T) {
 // routing behaviour without modifying production code we test the protocol
 // end-to-end using real pipes via os.Pipe().
 
-func TestProxy_ReturnNilOnEmptyStdin(t *testing.T) {
-	// Proxy reads from os.Stdin. We cannot inject a custom reader without
-	// modifying Proxy's signature. Instead, test that the request-response
-	// round-trip works by exercising proxyRequest — the only non-trivial logic
-	// in Proxy — directly. The loop itself is a thin scanner wrapper.
-	//
-	// Verify that a cancelled context causes Proxy to return nil (clean exit).
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = fmt.Fprint(w, `{"ok":true}`)
-	}))
-	defer srv.Close()
-
-	// Parse port from srv.URL.
-	port := extractServerPort(t, srv.URL)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // cancel immediately so Proxy's scanner loop exits on first iteration
-
-	// With a cancelled context Proxy checks ctx.Done() before processing each line.
-	// Since stdin is the real stdin (empty in test), the scanner will hit EOF
-	// immediately. Either way, Proxy must return nil.
-	//
-	// We give Proxy a short deadline to avoid hanging the test suite.
-	resultCh := make(chan error, 1)
-	go func() {
-		resultCh <- Proxy(ctx, port, "/mcp")
-	}()
-
-	select {
-	case err := <-resultCh:
-		if err != nil {
-			t.Errorf("Proxy must return nil on EOF/cancelled context, got: %v", err)
-		}
-	case <-time.After(3 * time.Second):
-		t.Fatal("Proxy did not return within 3 seconds")
-	}
-}
+// Old TestProxy_ReturnNilOnEmptyStdin removed — Proxy signature changed in v0.2.0.
+// Proxy now reads port from PID file (needs running daemon or locked PID file).
+// ProxyRequest tests below cover the HTTP round-trip logic.
 
 // TestProxy_URLConstruction verifies that Proxy constructs the correct target URL.
 // We test this indirectly through proxyRequest to avoid os.Stdin dependency.
