@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -204,5 +205,51 @@ func TestIsHeld_TrueWhileLocked_FalseAfterRelease(t *testing.T) {
 
 	if IsHeld(path) {
 		t.Fatal("IsHeld must be false after release")
+	}
+}
+
+func TestInheritFD_ReflockSameOFD(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("InheritFD uses flock; not supported on Windows")
+	}
+
+	path := filepath.Join(t.TempDir(), "test.pid")
+
+	// Acquire a real lock.
+	l, err := TryLock(path)
+	if err != nil {
+		t.Fatalf("TryLock: %v", err)
+	}
+	defer l.Release()
+
+	// InheritFD on the SAME fd — must succeed because re-flock on the same
+	// Open File Description is either idempotent (returns 0 on local fs) or
+	// returns EWOULDBLOCK (some NFS implementations), both treated as success.
+	fd := int(l.File().Fd())
+	inherited, err := InheritFD(fd, path)
+	if err != nil {
+		t.Fatalf("InheritFD on same OFD: %v", err)
+	}
+
+	// Verify the returned Lock is usable — WriteData must succeed.
+	data := []byte(`{"pid":54321,"port":9090}`)
+	if err := inherited.WriteData(data); err != nil {
+		t.Fatalf("WriteData via inherited lock: %v", err)
+	}
+
+	// Verify written content.
+	got, err := ReadLocked(path)
+	if err != nil {
+		t.Fatalf("ReadLocked: %v", err)
+	}
+	if string(got) != string(data) {
+		t.Errorf("data mismatch: got %q, want %q", got, data)
+	}
+}
+
+func TestInheritFD_InvalidFD(t *testing.T) {
+	_, err := InheritFD(999, "nonexistent.pid")
+	if err == nil {
+		t.Fatal("InheritFD with invalid fd must return error")
 	}
 }

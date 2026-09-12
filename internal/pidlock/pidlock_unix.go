@@ -105,7 +105,11 @@ func InheritFD(fd int, name string) (*Lock, error) {
 	}
 	syscall.CloseOnExec(fd)
 
-	// Re-acquire on the same OFD — no-op on local fs, real on NFS.
+	// Re-acquire flock on the inherited OFD. On local filesystems, flock on
+	// the same Open File Description is idempotent (returns 0). On NFS with
+	// fcntl-emulated flocks the lock may not survive fork, so re-flock is
+	// required. Some kernels/NFS implementations may return EWOULDBLOCK even
+	// for same-OFD re-flock — that is harmless and treated as success.
 	if err := flockNB(f); err != nil && !errors.Is(err, syscall.EWOULDBLOCK) {
 		return nil, fmt.Errorf("pidlock: re-flock inherited fd: %w", err)
 	}
