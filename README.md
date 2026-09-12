@@ -215,6 +215,12 @@ d := daemon.NewWithDeps(cfg, mockPIDStore, mockProcs, mockHealth)
 go test ./...
 ```
 
+## Not a Service Manager
+
+`grpmsoft/daemon` is not a system service manager. If you need a long-lived daemon under systemd, launchd, or Windows SCM, use [kardianos/service](https://github.com/kardianos/service) -- it is the industry standard for that job.
+
+`grpmsoft/daemon` manages a background process **on demand**: your CLI starts it when needed, shares it between clients, and shuts it down when idle. The owner of the process lifetime is **demand**, not an init system. The two libraries complement each other: if you need your tool to be present from boot, run `myapp serve` under kardianos/service and skip `EnsureRunning`.
+
 ## Contributing
 
 Contributions are welcome. Please open an issue or pull request on [GitHub](https://github.com/grpmsoft/daemon).

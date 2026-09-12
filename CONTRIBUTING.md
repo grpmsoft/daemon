@@ -37,6 +37,7 @@ go tool cover -html=coverage.out
 - All public types and functions must have doc comments
 - No `unsafe` except where required for Win32 API calls (`internal/process_windows.go`)
 - No external dependencies -- stdlib only
+- No `text/template` -- it pulls `reflect.MethodByName` which breaks dead-code elimination in the linker, bloating binaries for all importers
 
 ## Pull Requests
 

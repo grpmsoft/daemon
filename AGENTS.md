@@ -182,6 +182,13 @@ d := daemon.NewWithDeps(cfg, mockPIDs, mockProcs, mockHealth)
 All three interfaces (PIDStore, ProcessManager, HealthChecker) are small and
 easy to mock. See daemon_test.go for examples.
 
+## Positioning
+
+This library manages an **on-demand** background process owned by CLI callers.
+It is NOT a system service manager. For systemd/launchd/SCM integration, use
+[kardianos/service](https://github.com/kardianos/service). The two are complementary,
+not competing. Do not mix `Restart=always` with idle auto-shutdown.
+
 ## Ecosystem
 
 | Repo | Relationship |
