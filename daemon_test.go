@@ -314,57 +314,48 @@ func TestDaemon_Start_ContextCancelled_ReturnsError(t *testing.T) {
 // Tests: Stop
 // ---------------------------------------------------------------------------
 
-func TestDaemon_Stop_NoPIDFile_ReturnsError(t *testing.T) {
+func TestDaemon_Stop_NoPIDFile_Idempotent(t *testing.T) {
 	pids := &pidStoreMock{loadErr: errors.New("pid file not found")}
 	d := newMockDaemon(pids, &mockProcessManager{}, &mockHealthChecker{})
 
-	err := d.Stop()
+	err := d.Stop(context.Background())
 
-	if err == nil {
-		t.Fatal("expected error, got nil")
-	}
-	if !strings.Contains(err.Error(), "pid file not found") {
-		t.Errorf("error %q does not contain %q", err, "pid file not found")
+	// Stop on a stopped daemon is idempotent — returns nil.
+	if err != nil {
+		t.Fatalf("Stop on stopped daemon must be idempotent, got %v", err)
 	}
 }
 
-func TestDaemon_Stop_DeadProcess_ClearsPIDWithoutKill(t *testing.T) {
-	pids := &pidStoreMock{saved: &PIDInfo{PID: 9999, Port: 8080}}
+func TestDaemon_Stop_DeadProcess_Idempotent(t *testing.T) {
+	pids := &pidStoreMock{saved: &PIDInfo{PID: 9999, Port: 8080}, aliveResult: false}
 	procs := &mockProcessManager{aliveResult: false}
 	d := newMockDaemon(pids, procs, &mockHealthChecker{})
 
-	err := d.Stop()
+	err := d.Stop(context.Background())
 
+	// Dead process (lock not held) → idempotent nil, no kill.
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if procs.killCallCount != 0 {
 		t.Errorf("KillProcess must NOT be called for a dead process, got %d calls", procs.killCallCount)
 	}
-	if pids.clearCallCount != 1 {
-		t.Errorf("Clear must be called once, got %d", pids.clearCallCount)
-	}
-	if pids.saved != nil {
-		t.Errorf("PID store must be cleared, got %+v", pids.saved)
-	}
 }
 
-func TestDaemon_Stop_AliveProcess_KillsAndClears(t *testing.T) {
+func TestDaemon_Stop_AliveProcess_KillsProcess(t *testing.T) {
 	const pid = 12345
-	pids := &pidStoreMock{saved: &PIDInfo{PID: pid, Port: 8080}, aliveResult: true}
+	pids := &pidStoreMock{saved: &PIDInfo{PID: pid, Port: 0}, aliveResult: true}
 	procs := &mockProcessManager{aliveResult: true}
 	d := newMockDaemon(pids, procs, &mockHealthChecker{})
 
-	err := d.Stop()
+	// Port=0 → HTTP shutdown skipped → direct KillProcess.
+	err := d.Stop(context.Background())
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if procs.killCallCount != 1 {
 		t.Errorf("KillProcess must be called once, got %d", procs.killCallCount)
-	}
-	if pids.clearCallCount != 1 {
-		t.Errorf("Clear must be called once, got %d", pids.clearCallCount)
 	}
 }
 
@@ -376,7 +367,7 @@ func TestDaemon_Stop_KillFails_ReturnsError(t *testing.T) {
 	}
 	d := newMockDaemon(pids, procs, &mockHealthChecker{})
 
-	err := d.Stop()
+	err := d.Stop(context.Background())
 
 	if err == nil {
 		t.Fatal("expected error, got nil")
@@ -412,7 +403,7 @@ func TestDaemon_Status_NoPIDFile_ReturnsStopped(t *testing.T) {
 
 func TestDaemon_Status_AlivePID_ReturnsRunning(t *testing.T) {
 	startTime := time.Date(2026, 9, 4, 10, 0, 0, 0, time.UTC)
-	pids := &pidStoreMock{saved: &PIDInfo{PID: 777, Port: 9000, Name: "testapp", StartTime: startTime}}
+	pids := &pidStoreMock{saved: &PIDInfo{PID: 777, Port: 9000, Name: "testapp", StartTime: startTime}, aliveResult: true}
 	procs := &mockProcessManager{aliveResult: true}
 	d := newMockDaemon(pids, procs, &mockHealthChecker{})
 
@@ -441,18 +432,19 @@ func TestDaemon_Status_AlivePID_ReturnsRunning(t *testing.T) {
 	}
 }
 
-func TestDaemon_Status_DeadPID_ReturnsStatusError(t *testing.T) {
-	pids := &pidStoreMock{saved: &PIDInfo{PID: 888, Port: 6060}}
+func TestDaemon_Status_LockNotHeld_ReturnsStopped(t *testing.T) {
+	// Lock not held (aliveResult=false) → daemon not running → StatusStopped.
+	pids := &pidStoreMock{saved: &PIDInfo{PID: 888, Port: 6060}, aliveResult: false}
 	procs := &mockProcessManager{aliveResult: false}
 	d := newMockDaemon(pids, procs, &mockHealthChecker{})
 
 	info, err := d.Status()
 
 	if err != nil {
-		t.Fatalf("Status must not return an error for a dead PID: %v", err)
+		t.Fatalf("Status must not return an error: %v", err)
 	}
-	if info.Status != StatusError {
-		t.Errorf("got %v, want %v", info.Status, StatusError)
+	if info.Status != StatusStopped {
+		t.Errorf("got %v, want %v (lock not held = stopped)", info.Status, StatusStopped)
 	}
 	if info.PID != 888 {
 		t.Errorf("PID must be preserved in StatusError, got %v", info.PID)
@@ -463,7 +455,7 @@ func TestDaemon_Status_DeadPID_ReturnsStatusError(t *testing.T) {
 }
 
 func TestDaemon_Status_ZeroStartTime_UptimeIsZero(t *testing.T) {
-	pids := &pidStoreMock{saved: &PIDInfo{PID: 100, Port: 8080}} // StartTime is zero
+	pids := &pidStoreMock{saved: &PIDInfo{PID: 100, Port: 8080}, aliveResult: true}
 	procs := &mockProcessManager{aliveResult: true}
 	d := newMockDaemon(pids, procs, &mockHealthChecker{})
 
@@ -674,16 +666,10 @@ func TestDaemon_Start_DataDirAlreadyExists_Succeeds(t *testing.T) {
 // must be cleared without killing.
 // ---------------------------------------------------------------------------
 
-// TestDaemon_Stop_StalePID_ClearsWithoutKill verifies that when IsAlive()
-// returns false (PID recycled to a different process), Stop clears the PID
-// file without calling KillProcess.
-//
-// The existing TestDaemon_Stop_AliveProcess_KillsAndClears covers
-// aliveResult=true. This test covers aliveResult=false with a non-nil
-// saved PID, which is the "stale/recycled" scenario (B5 fix).
-func TestDaemon_Stop_StalePID_ClearsWithoutKill(t *testing.T) {
-	// aliveResult=false means IsAlive() returns false (PID recycled or
-	// process died after PID file was written).
+// TestDaemon_Stop_StalePID_Idempotent verifies that when IsAlive()
+// returns false (lock not held — PID recycled or daemon died), Stop
+// returns nil without killing.
+func TestDaemon_Stop_StalePID_Idempotent(t *testing.T) {
 	pids := &pidStoreMock{
 		saved:       &PIDInfo{PID: 77777, Port: 8080, Name: "testapp"},
 		aliveResult: false,
@@ -691,18 +677,12 @@ func TestDaemon_Stop_StalePID_ClearsWithoutKill(t *testing.T) {
 	procs := &mockProcessManager{aliveResult: false}
 	d := newMockDaemon(pids, procs, &mockHealthChecker{})
 
-	err := d.Stop()
+	err := d.Stop(context.Background())
 	if err != nil {
-		t.Fatalf("Stop must succeed for a stale PID: %v", err)
+		t.Fatalf("Stop must be idempotent for stale PID: %v", err)
 	}
 	if procs.killCallCount != 0 {
-		t.Errorf("KillProcess must NOT be called for a stale PID (aliveResult=false), got %d calls", procs.killCallCount)
-	}
-	if pids.clearCallCount != 1 {
-		t.Errorf("Clear must be called once to remove the stale PID file, got %d", pids.clearCallCount)
-	}
-	if pids.saved != nil {
-		t.Errorf("PID store must be empty after clearing stale PID, got %+v", pids.saved)
+		t.Errorf("KillProcess must NOT be called for a stale PID, got %d calls", procs.killCallCount)
 	}
 }
 

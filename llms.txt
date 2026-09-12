@@ -36,7 +36,7 @@ Two modes: Client mode (Start/Stop/Restart/Status — manage a background daemon
 - `NewWithDeps(Config, PIDStore, ProcessManager, HealthChecker) *Daemon` — create with mocks for testing.
 - `Serve(ctx, Config, http.Handler) error` — run as daemon: picks free port, writes PID file, registers /health + /daemon/connect + /daemon/disconnect, blocks until signal/context/idle.
 - `EnsureRunning(ctx, Config, binary, args) (port int, err error)` — start-if-needed with race-safe PID locking. Two agents calling simultaneously is safe.
-- `Proxy(ctx, port, mcpPath) error` — bridge stdin/stdout to daemon HTTP endpoint with connection tracking.
+- `Proxy(ctx, cfg Config, opts ProxyOptions) error` — bridge io.Reader/Writer to daemon HTTP endpoint. Testable, no hardcoded timeout.
 
 ### Daemon Methods
 
@@ -45,7 +45,7 @@ Two modes: Client mode (Start/Stop/Restart/Status — manage a background daemon
 - `Restart(ctx, binary, args) error` — stop + start.
 - `Status() (*Info, error)` — read PID file, check process liveness, return status snapshot.
 - `IsRunning() bool` — quick check via PID file.
-- `SetHandler(http.Handler)` — set HTTP handler before Serve().
+- `Stop(ctx) error` — graceful stop: HTTP /daemon/shutdown → wait → fallback to kill.
 
 ## Usage Patterns
 
@@ -54,7 +54,7 @@ Two modes: Client mode (Start/Stop/Restart/Status — manage a background daemon
 d := daemon.New(daemon.Config{Name: "myapp", DataDir: ".myapp"})
 d.Start(ctx, binary, args)  // spawns detached process, waits for health
 info, _ := d.Status()        // reads PID file, checks process
-d.Stop()                     // kills process, clears PID file
+d.Stop(ctx)                     // kills process, clears PID file
 ```
 
 ### Server Mode
@@ -69,7 +69,7 @@ daemon.Serve(ctx, daemon.Config{
 ### Proxy Mode (MCP/JSON-RPC bridge)
 ```go
 port, _ := daemon.EnsureRunning(ctx, cfg, binary, args)
-daemon.Proxy(ctx, port, "/mcp") // stdin/stdout ↔ HTTP
+daemon.Proxy(ctx, cfg, daemon.ProxyOptions{MCPPath: "/mcp"}) // stdin/stdout ↔ HTTP
 ```
 
 ## File Structure

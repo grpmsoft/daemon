@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -59,6 +60,25 @@ type Config struct {
 	IdleTimeout time.Duration
 }
 
+// Validate checks the configuration for invalid values.
+// Name must be a single path element (no slashes). DataDir must be non-empty.
+// HealthPath must not conflict with reserved daemon paths.
+func (c *Config) Validate() error {
+	if c.Name == "" {
+		return fmt.Errorf("%w: Name is required", ErrInvalidConfig)
+	}
+	if strings.ContainsAny(c.Name, "/\\") || c.Name == "." || c.Name == ".." {
+		return fmt.Errorf("%w: Name %q must be a single path element", ErrInvalidConfig, c.Name)
+	}
+	if c.DataDir == "" {
+		return fmt.Errorf("%w: DataDir is required", ErrInvalidConfig)
+	}
+	if c.HealthPath == "/" {
+		return fmt.Errorf("%w: HealthPath %q conflicts with root handler", ErrInvalidConfig, c.HealthPath)
+	}
+	return nil
+}
+
 func (c *Config) applyDefaults() {
 	if c.Timeout == 0 {
 		c.Timeout = 30 * time.Second
@@ -91,11 +111,11 @@ type PIDStore interface {
 
 // PIDInfo holds the persisted state of a running daemon, as returned by PIDStore.Load().
 type PIDInfo struct {
-	PID       int
-	Port      int
-	Name      string
-	Binary    string
-	StartTime time.Time
+	PID       int       `json:"pid"`
+	Port      int       `json:"port"`
+	Name      string    `json:"name"`
+	Binary    string    `json:"binary"`
+	StartTime time.Time `json:"startTime"`
 }
 
 // ProcessManager abstracts platform-specific process lifecycle operations.

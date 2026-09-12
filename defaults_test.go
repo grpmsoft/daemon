@@ -54,23 +54,7 @@ func TestNew_IsRunning_WithNoFile(t *testing.T) {
 	}
 }
 
-// TestSetHandler verifies that SetHandler stores the handler on the Daemon.
-func TestSetHandler_StoresHandler(t *testing.T) {
-	dir := t.TempDir()
-	d := New(Config{Name: "app", DataDir: dir})
-	if d.handler != nil {
-		t.Error("handler must be nil before SetHandler")
-	}
-
-	h := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	})
-	d.SetHandler(h)
-
-	if d.handler == nil {
-		t.Error("handler must be set after SetHandler")
-	}
-}
+// SetHandler was deleted in v0.2.0 — dead code, nothing read handler field.
 
 // TestDefaultHealthHandler_GetReturns200 verifies the health endpoint returns 200 OK.
 func TestDefaultHealthHandler_GetReturns200(t *testing.T) {
@@ -186,9 +170,10 @@ func TestDefaultPIDStoreAdapter_SaveLoadClear(t *testing.T) {
 		t.Errorf("got %v, want %v", data.StartTime, startTime)
 	}
 
-	// IsAlive with current PID → true.
-	if !store.IsAlive() {
-		t.Error("expected true, got false")
+	// IsAlive requires pidlock held (v0.2.0 — lock-based identity).
+	// Without lock, IsAlive must be false even with valid PID.
+	if store.IsAlive() {
+		t.Error("IsAlive must be false without lock held")
 	}
 
 	// Clear.

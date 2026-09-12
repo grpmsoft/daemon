@@ -61,7 +61,7 @@ func main() {
     fmt.Printf("Status: %s, PID: %d, Port: %d\n", info.Status, info.PID, info.Port)
 
     // Stop the daemon.
-    if err := d.Stop(); err != nil {
+    if err := d.Stop(context.Background()); err != nil {
         fmt.Fprintf(os.Stderr, "stop: %v\n", err)
     }
 }
@@ -116,8 +116,10 @@ port, err := daemon.EnsureRunning(ctx, cfg, binary, args)
 if err != nil {
     return err
 }
-return daemon.Proxy(ctx, port, "/mcp")
+return daemon.Proxy(ctx, cfg, daemon.ProxyOptions{MCPPath: "/mcp"})
 ```
+
+`ProxyOptions` supports custom `Stdin`/`Stdout` (for testing) and `LogPayloads` (opt-in, disabled by default for security).
 
 ## EnsureRunning
 

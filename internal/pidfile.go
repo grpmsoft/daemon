@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+
+	"github.com/grpmsoft/daemon/internal/pidlock"
 	"strconv"
 	"strings"
 	"sync"
@@ -23,11 +25,11 @@ type pidData struct {
 
 // PIDInfo mirrors daemon.PIDInfo for the PIDStore interface contract.
 type PIDInfo struct {
-	PID       int
-	Port      int
-	Name      string
-	Binary    string
-	StartTime time.Time
+	PID       int       `json:"pid"`
+	Port      int       `json:"port"`
+	Name      string    `json:"name"`
+	Binary    string    `json:"binary"`
+	StartTime time.Time `json:"startTime"`
 }
 
 // PIDFile manages reading and writing a JSON PID file on disk.
@@ -101,7 +103,7 @@ func (p *PIDFile) Load() (PIDInfo, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	raw, err := os.ReadFile(p.path)
+	raw, err := pidlock.ReadLocked(p.path)
 	if err != nil {
 		return PIDInfo{}, fmt.Errorf("read pid file %s: %w", p.path, err)
 	}
@@ -135,33 +137,12 @@ func (p *PIDFile) Clear() error {
 	return nil
 }
 
-// IsAlive loads the PID file and checks whether the recorded process is still running.
-// If the PID file contains a binary path, it also verifies that the running process
-// matches the expected binary. Old PID files without a binary field skip verification.
+// IsAlive checks whether the daemon that owns the PID file is still running.
+// Uses pidlock.IsHeld — if the PID file is flock'd (Unix) or share-mode held
+// (Windows), the owner is alive by construction. Works on all platforms
+// including macOS/BSD where /proc is unavailable.
 func (p *PIDFile) IsAlive() bool {
-	data, err := p.Load()
-	if err != nil {
-		return false
-	}
-	if !IsProcessAlive(data.PID) {
-		return false
-	}
-
-	// If Binary was stored, verify the running process is actually our daemon,
-	// not a recycled PID running a different executable.
-	if data.Binary != "" {
-		actual, err := ProcessBinaryPath(data.PID)
-		if err != nil || actual == "" {
-			// Cannot determine binary (e.g. macOS, or permission denied).
-			// Fall back to PID-only check.
-			return true
-		}
-		if !binaryPathsEqual(actual, data.Binary) {
-			return false
-		}
-	}
-
-	return true
+	return pidlock.IsHeld(p.path)
 }
 
 // binaryPathsEqual compares two binary paths with platform-aware normalization.

@@ -29,8 +29,8 @@ Examples of unacceptable behavior:
 ## Enforcement
 
 Instances of abusive, harassing, or otherwise unacceptable behavior may be
-reported by opening an issue on the [daemon repository](https://github.com/grpmsoft/daemon/issues)
-or contacting the project maintainers.
+reported privately via [GitHub Security Advisories](https://github.com/grpmsoft/daemon/security/advisories/new)
+or by emailing the project maintainer. **Do not open a public issue for conduct violations.**
 
 ## Attribution
 

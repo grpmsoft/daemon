@@ -6,9 +6,12 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/grpmsoft/daemon/internal/pidlock"
 )
 
 // TestServe_StartsAndRespondsToHealthCheck verifies that Serve:
@@ -238,45 +241,32 @@ func waitOwnPIDFile(t *testing.T, store PIDStore) {
 	t.Fatal("Serve did not write its PID file")
 }
 
-// V2c regression: Serve() must not remove a PID file a newer instance has overwritten.
-func TestServe_CompareAndDelete_KeepsForeignPIDFile(t *testing.T) {
-	dir := t.TempDir()
-	ctx, cancel := context.WithCancel(context.Background())
-	errCh := make(chan error, 1)
-	go func() { errCh <- Serve(ctx, Config{Name: "cad", DataDir: dir}, nil) }()
-	store := newDefaultPIDStore(dir, "cad")
-	waitOwnPIDFile(t, store)
+// With inherited-lock PID file, the file is never deleted (flock+unlink race prevention).
+// Instead, the lock is released on exit — IsHeld becomes false.
 
-	// A newer instance overwrites the PID file; we are now the orphan.
-	if err := store.Save(os.Getpid()+1, 65000, "cad", "/other/binary", time.Now()); err != nil {
-		t.Fatal(err)
-	}
-	cancel()
-	if err := <-errCh; err != nil {
-		t.Fatalf("Serve: %v", err)
-	}
-	data, err := store.Load()
-	if err != nil {
-		t.Fatalf("V2c regression: orphan deleted the live daemon's PID file: %v", err)
-	}
-	if data.PID != os.Getpid()+1 {
-		t.Fatalf("PID file changed: got %d, want %d", data.PID, os.Getpid()+1)
-	}
-}
-
-// Positive case: Serve() does remove its own PID file.
-func TestServe_CompareAndDelete_RemovesOwnPIDFile(t *testing.T) {
+// TestServe_LockReleasedOnShutdown verifies that Serve releases the PID file lock
+// when shutting down, making the file available for a new instance.
+func TestServe_LockReleasedOnShutdown(t *testing.T) {
 	dir := t.TempDir()
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
 	go func() { errCh <- Serve(ctx, Config{Name: "cad2", DataDir: dir}, nil) }()
 	store := newDefaultPIDStore(dir, "cad2")
 	waitOwnPIDFile(t, store)
+
+	// Lock is held while Serve is running.
+	pidPath := filepath.Join(dir, "cad2.pid")
+	if !pidlock.IsHeld(pidPath) {
+		t.Fatal("lock must be held while Serve is running")
+	}
+
 	cancel()
 	if err := <-errCh; err != nil {
 		t.Fatalf("Serve: %v", err)
 	}
-	if _, err := os.Stat(store.Path()); !os.IsNotExist(err) {
-		t.Fatalf("own PID file must be removed on shutdown, stat err=%v", err)
+
+	// After shutdown, lock is released — file stays but IsHeld is false.
+	if pidlock.IsHeld(pidPath) {
+		t.Fatal("lock must be released after Serve shuts down")
 	}
 }

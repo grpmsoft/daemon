@@ -4,7 +4,7 @@
 
 daemon is a Pure Go cross-platform daemon lifecycle library. It is published
 under the [grpmsoft](https://github.com/grpmsoft) organization and consumed by
-[GODE](https://github.com/goco-ai/gode) (headless IDE) for shared gopls daemon
+GLIDE (headless IDE, codename GODE) for shared gopls daemon
 management.
 
 It handles the full daemon lifecycle: start, stop, restart, status, health
@@ -20,7 +20,7 @@ import "github.com/grpmsoft/daemon"
 // Client mode: manage a background process.
 d := daemon.New(daemon.Config{Name: "myapp", DataDir: ".myapp"})
 d.Start(ctx, "/usr/bin/myapp", []string{"serve"})
-d.Stop()
+d.Stop(ctx)
 info, _ := d.Status()
 
 // Server mode: run as the daemon process (called by the spawned binary).
@@ -34,7 +34,7 @@ daemon.Serve(ctx, daemon.Config{
 port, _ := daemon.EnsureRunning(ctx, cfg, binary, args)
 
 // Proxy mode: bridge stdin/stdout to daemon HTTP.
-daemon.Proxy(ctx, port, "/mcp")
+daemon.Proxy(ctx, cfg, daemon.ProxyOptions{MCPPath: "/mcp"})
 ```
 
 ## Architecture
@@ -99,7 +99,7 @@ internal/
   blocks until signal/context/idle.
 - **EnsureRunning(ctx, Config, binary, args)** -- start-if-needed pattern with
   race condition handling. Returns the port.
-- **Proxy(ctx, port, mcpPath)** -- bridges stdin/stdout to daemon HTTP endpoint
+- **Proxy(ctx, cfg, ProxyOptions)** -- bridges stdin/stdout to daemon HTTP endpoint
   with connection tracking (connect on start, disconnect on exit).
 
 ## Usage Patterns
@@ -112,7 +112,7 @@ Consumer CLI commands call Daemon methods:
 d := daemon.New(cfg)
 d.Start(ctx, binary, args)  // spawns detached process, waits for health
 d.Status()                   // reads PID file, checks process
-d.Stop()                     // kills process, clears PID file
+d.Stop(ctx)                     // kills process, clears PID file
 d.Restart(ctx, binary, args) // stop + start
 ```
 
@@ -135,7 +135,7 @@ the daemon's HTTP endpoint:
 
 ```go
 port, _ := daemon.EnsureRunning(ctx, cfg, binary, args)
-daemon.Proxy(ctx, port, "/mcp")
+daemon.Proxy(ctx, cfg, daemon.ProxyOptions{MCPPath: "/mcp"})
 ```
 
 ### Testing
@@ -153,7 +153,7 @@ easy to mock. See daemon_test.go for examples.
 
 | Repo | Relationship |
 |------|-------------|
-| [gode](https://github.com/goco-ai/gode) | Consumer -- shared gopls daemon management |
+| GLIDE (codename GODE) | Consumer -- shared gopls daemon management |
 | [grpmsoft](https://github.com/grpmsoft) | Parent organization |
 
 ## Development
