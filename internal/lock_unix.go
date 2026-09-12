@@ -25,13 +25,14 @@ func Lock(path string) (*os.File, error) {
 	return f, nil
 }
 
-// Unlock releases the lock and removes the lock file.
+// Unlock releases the lock. The lock file is intentionally NOT deleted —
+// removing the file while another process is blocked on flock() causes
+// the classic inode-reuse race where two holders acquire the lock on
+// different inodes simultaneously. An empty <name>.lock file is harmless.
 func Unlock(f *os.File) {
 	if f == nil {
 		return
 	}
 	_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
-	name := f.Name()
 	_ = f.Close()
-	_ = os.Remove(name)
 }

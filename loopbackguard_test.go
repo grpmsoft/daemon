@@ -119,6 +119,28 @@ func TestLoopbackGuard(t *testing.T) {
 			wantStatus:      http.StatusOK,
 			wantPassThrough: true,
 		},
+		// V4 bypass attack vectors — crafted origins that previously passed strings.Contains.
+		{
+			name:            "origin bypass: 127.0.0.1.evil.com — rejected",
+			host:            "127.0.0.1:8080",
+			origin:          "http://127.0.0.1.evil.com",
+			wantStatus:      http.StatusForbidden,
+			wantPassThrough: false,
+		},
+		{
+			name:            "origin bypass: localhost.evil.com — rejected",
+			host:            "127.0.0.1:8080",
+			origin:          "http://localhost.evil.com",
+			wantStatus:      http.StatusForbidden,
+			wantPassThrough: false,
+		},
+		{
+			name:            "origin bypass: query param with ://localhost — rejected",
+			host:            "127.0.0.1:8080",
+			origin:          "http://evil.com/?x=://localhost",
+			wantStatus:      http.StatusForbidden,
+			wantPassThrough: false,
+		},
 	}
 
 	for _, tt := range tests {

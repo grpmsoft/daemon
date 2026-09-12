@@ -38,10 +38,12 @@ func Proxy(ctx context.Context, port int, mcpPath string) error {
 
 	plog.Printf("proxy started, target=%s", baseURL)
 
-	signalConnect(ctx, client, daemonBase)
+	connected := signalConnect(ctx, client, daemonBase)
 	defer func() {
-		plog.Printf("proxy stopping, sending disconnect")
-		signalDisconnect(ctx, client, daemonBase)
+		if connected {
+			plog.Printf("proxy stopping, sending disconnect")
+			signalDisconnect(client, daemonBase)
+		}
 	}()
 
 	scanner := bufio.NewScanner(os.Stdin)
@@ -116,22 +118,24 @@ func proxyLogger(port int) *log.Logger {
 
 // signalConnect notifies the daemon that a new proxy connection is active.
 // Best-effort: errors are silently ignored (daemon may be an older version).
-func signalConnect(ctx context.Context, client *http.Client, daemonBase string) {
+func signalConnect(ctx context.Context, client *http.Client, daemonBase string) bool {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, daemonBase+"/daemon/connect", nil)
 	if err != nil {
-		return
+		return false
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return
+		return false
 	}
 	_ = resp.Body.Close()
+	return resp.StatusCode < 300
 }
 
 // signalDisconnect notifies the daemon that a proxy connection has ended.
 // Best-effort: errors are silently ignored. Uses a background context because
 // the original ctx may already be cancelled at defer time.
-func signalDisconnect(_ context.Context, client *http.Client, daemonBase string) {
+// Must only be called if signalConnect returned true.
+func signalDisconnect(client *http.Client, daemonBase string) {
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, daemonBase+"/daemon/disconnect", nil)
 	if err != nil {
 		return

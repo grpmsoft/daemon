@@ -21,10 +21,10 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
-	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -358,7 +358,14 @@ func Serve(ctx context.Context, cfg Config, handler http.Handler) error {
 
 	runErr := g.Run()
 
-	clearErr := pidStore.Clear()
+	// Compare-and-delete: only clear PID file if it still points to OUR pid.
+	// An orphan daemon whose PID file was overwritten by a newer instance
+	// must not delete the newer instance's PID file on exit.
+	myPID := os.Getpid()
+	var clearErr error
+	if data, loadErr := pidStore.Load(); loadErr == nil && data.PID == myPID {
+		clearErr = pidStore.Clear()
+	}
 
 	// context.Canceled from signal handler is a clean shutdown.
 	if errors.Is(runErr, context.Canceled) {
@@ -444,12 +451,23 @@ func loopbackGuard(next http.Handler, port int) http.Handler {
 			return
 		}
 		if origin := r.Header.Get("Origin"); origin != "" {
-			if !strings.Contains(origin, "://127.0.0.1") &&
-				!strings.Contains(origin, "://localhost") {
+			if !isLoopbackOrigin(origin) {
 				http.Error(w, "forbidden: non-loopback origin", http.StatusForbidden)
 				return
 			}
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// isLoopbackOrigin parses an Origin header value and checks if the hostname
+// is a loopback address. Uses net/url.Parse for safe parsing instead of
+// string matching, which would pass crafted values like "http://127.0.0.1.evil.com".
+func isLoopbackOrigin(origin string) bool {
+	u, err := url.Parse(origin)
+	if err != nil {
+		return false
+	}
+	host := u.Hostname()
+	return host == "127.0.0.1" || host == "localhost" || host == "::1"
 }

@@ -15,10 +15,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **B2**: `Stop()` now uses `IsAlive()` (PID + binary path verification) instead of bare `IsProcessAlive()`, preventing accidental termination of unrelated processes with recycled PIDs
 - **B5**: Unix `StartDetached` uses a reaper goroutine (`cmd.Wait()`) instead of `Process.Release()`, preventing zombie processes. Added `isZombie()` detection via `/proc/<pid>/stat`
 - **B1**: `EnsureRunning()` serializes concurrent startup attempts with an exclusive file lock (`flock` on Unix, `LockFileEx` on Windows), preventing duplicate daemon spawns
+- **V1**: `Unlock()` no longer deletes the lock file — prevents the classic flock+unlink race where two processes acquire the lock on different inodes simultaneously
+- **V2**: Binary path comparison now trims Linux ` (deleted)` suffix and resolves symlinks (`filepath.EvalSymlinks`), fixing false mismatch after `go install` binary replacement. Case-insensitive comparison on Windows
+- **V2**: `Serve()` cleanup uses compare-and-delete — only clears PID file if it still points to our own PID, preventing orphan daemons from deleting a live daemon's PID file
+- **V3b**: `Proxy()` tracks whether `signalConnect` succeeded and skips `signalDisconnect` if it didn't, preventing the library's own code from producing stray disconnects that drive the counter negative
 
 ### Security
 
 - **S1**: Added `loopbackGuard` middleware to `Serve()` — rejects HTTP requests with non-loopback `Host` or `Origin` headers, preventing DNS rebinding attacks (MCP spec requirement)
+- **V4**: Origin validation uses `net/url.Parse` + hostname extraction instead of `strings.Contains`, blocking bypass vectors like `http://127.0.0.1.evil.com` and `http://localhost.evil.com`
 
 ### Changed
 

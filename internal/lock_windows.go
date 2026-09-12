@@ -44,12 +44,10 @@ func Lock(path string) (*os.File, error) {
 	return f, nil
 }
 
-// Unlock releases the lock and removes the lock file.
+// Unlock releases the lock. The lock file is intentionally NOT deleted.
 func Unlock(f *os.File) {
 	if f == nil {
 		return
 	}
-	name := f.Name()
 	_ = f.Close()
-	_ = os.Remove(name)
 }
