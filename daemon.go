@@ -520,10 +520,17 @@ func Serve(ctx context.Context, cfg Config, handler http.Handler) error {
 	ct := NewConnTracker()
 	shutdownCh := make(chan struct{}, 1)
 
+	serveCtx, serveCancel := context.WithCancel(ctx)
+	defer serveCancel()
+
 	mux := buildDaemonMux(cfg, ct, shutdownCh, handler, startTime)
 	server := &http.Server{
 		Handler:           loopbackGuard(mux, port),
 		ReadHeaderTimeout: 10 * time.Second,
+		// BaseContext derives each request's context from serveCtx.
+		// When server.Shutdown is called, in-flight request contexts are cancelled,
+		// which unblocks long-lived handlers like /daemon/attach.
+		BaseContext: func(_ net.Listener) context.Context { return serveCtx },
 	}
 
 	sigCtx, sigStop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
@@ -629,20 +636,57 @@ func waitForLockRelease(ctx context.Context, pids PIDStore, timeout time.Duratio
 	}
 }
 
-// buildDaemonMux creates the HTTP mux with health, connect/disconnect, shutdown endpoints.
+// buildDaemonMux creates the HTTP mux with health, connect/disconnect, attach, shutdown endpoints.
 func buildDaemonMux(cfg Config, ct *ConnTracker, shutdownCh chan struct{}, handler http.Handler, startTime time.Time) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.Handle(cfg.HealthPath, defaultHealthHandler(cfg.Name, startTime))
+
+	// Deprecated: use /daemon/attach. Kept for backward compatibility with v0.3.0 proxies.
 	mux.HandleFunc("POST /daemon/connect", func(w http.ResponseWriter, r *http.Request) {
 		ct.Connect()
 		fmt.Fprintf(os.Stderr, "[daemon] agent connected (active: %d, remote: %s)\n", ct.Active(), r.RemoteAddr)
 		w.WriteHeader(http.StatusNoContent)
 	})
+	// Deprecated: use /daemon/attach. Kept for backward compatibility with v0.3.0 proxies.
 	mux.HandleFunc("POST /daemon/disconnect", func(w http.ResponseWriter, r *http.Request) {
 		ct.Disconnect()
 		fmt.Fprintf(os.Stderr, "[daemon] agent disconnected (active: %d, remote: %s)\n", ct.Active(), r.RemoteAddr)
 		w.WriteHeader(http.StatusNoContent)
 	})
+
+	// Lease-based connection tracking. The TCP connection IS the lease: when the
+	// client process dies, the kernel closes the socket, r.Context() is cancelled,
+	// and the connection count drops. No timers, no heartbeats.
+	mux.HandleFunc("GET /daemon/attach", func(w http.ResponseWriter, r *http.Request) {
+		ct.Connect()
+		defer ct.Disconnect()
+		fmt.Fprintf(os.Stderr, "[daemon] agent attached (active: %d, remote: %s)\n", ct.Active(), r.RemoteAddr)
+
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("X-Accel-Buffering", "no")
+		w.WriteHeader(http.StatusOK)
+
+		// Write one ack byte so the client knows the lease is established.
+		_, _ = w.Write([]byte{0x00})
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+
+		// Block until the client disconnects (r.Context cancelled by TCP close
+		// or server.Shutdown via BaseContext) or daemon shutdown is signalled.
+		select {
+		case <-r.Context().Done():
+		case <-shutdownCh:
+			// Re-push so shutdown actor also observes it.
+			select {
+			case shutdownCh <- struct{}{}:
+			default:
+			}
+		}
+		fmt.Fprintf(os.Stderr, "[daemon] agent detached (active: %d, remote: %s)\n", ct.Active()-1, r.RemoteAddr)
+	})
+
 	mux.HandleFunc("POST /daemon/shutdown", func(w http.ResponseWriter, _ *http.Request) {
 		fmt.Fprintf(os.Stderr, "[daemon] shutdown requested\n")
 		w.WriteHeader(http.StatusAccepted)

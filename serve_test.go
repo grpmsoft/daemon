@@ -241,6 +241,146 @@ func waitOwnPIDFile(t *testing.T, store PIDStore) {
 	t.Fatal("Serve did not write its PID file")
 }
 
+// ---------------------------------------------------------------------------
+// Tests: /daemon/attach (lease-based connection tracking)
+// ---------------------------------------------------------------------------
+
+// TestServe_AttachIncrementsAndDecrements verifies that GET /daemon/attach
+// increments the connection count on connect and decrements it when the
+// client disconnects (closes the response body).
+func TestServe_AttachIncrementsAndDecrements(t *testing.T) {
+	dir := t.TempDir()
+	cfg := Config{Name: "attach-test", DataDir: dir}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- Serve(ctx, cfg, nil) }()
+
+	store := newDefaultPIDStore(dir, "attach-test")
+	var port int
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		data, err := store.Load()
+		if err == nil && data.Port > 0 {
+			port = data.Port
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if port == 0 {
+		t.Fatal("PID file must be written within 5 seconds")
+	}
+
+	// Open an attach connection.
+	attachURL := fmt.Sprintf("http://127.0.0.1:%d/daemon/attach", port)
+	resp, err := http.Get(attachURL) //nolint:noctx,gosec // test-only
+	if err != nil {
+		t.Fatalf("GET /daemon/attach: %v", err)
+	}
+
+	// Read the ack byte.
+	ack := make([]byte, 1)
+	n, err := resp.Body.Read(ack)
+	if err != nil {
+		t.Fatalf("read ack: %v", err)
+	}
+	if n != 1 || ack[0] != 0x00 {
+		t.Fatalf("expected ack byte 0x00, got %d bytes: %v", n, ack[:n])
+	}
+
+	// Verify status code and headers.
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("got status %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != "application/octet-stream" {
+		t.Errorf("Content-Type = %q, want %q", ct, "application/octet-stream")
+	}
+	if cc := resp.Header.Get("Cache-Control"); cc != "no-store" {
+		t.Errorf("Cache-Control = %q, want %q", cc, "no-store")
+	}
+
+	// Close the client-side body — this disconnects the TCP, decrementing the count.
+	_ = resp.Body.Close()
+
+	// Give the server a moment to process the disconnect.
+	time.Sleep(200 * time.Millisecond)
+
+	// Shut down and verify clean exit.
+	cancel()
+	select {
+	case serveErr := <-errCh:
+		if serveErr != nil {
+			t.Errorf("Serve returned error: %v", serveErr)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Serve did not return within 5s")
+	}
+}
+
+// TestServe_AttachReturnsPromptlyOnShutdown verifies that when the daemon
+// shuts down, the /daemon/attach handler unblocks within 500ms.
+func TestServe_AttachReturnsPromptlyOnShutdown(t *testing.T) {
+	dir := t.TempDir()
+	cfg := Config{Name: "attach-shutdown", DataDir: dir}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- Serve(ctx, cfg, nil) }()
+
+	store := newDefaultPIDStore(dir, "attach-shutdown")
+	var port int
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		data, err := store.Load()
+		if err == nil && data.Port > 0 {
+			port = data.Port
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if port == 0 {
+		t.Fatal("PID file must be written within 5 seconds")
+	}
+
+	// Open attach connection.
+	attachCtx, attachCancel := context.WithCancel(context.Background())
+	defer attachCancel()
+	req, _ := http.NewRequestWithContext(attachCtx, http.MethodGet,
+		fmt.Sprintf("http://127.0.0.1:%d/daemon/attach", port), nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET /daemon/attach: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	// Read ack byte.
+	ack := make([]byte, 1)
+	if _, err := resp.Body.Read(ack); err != nil {
+		t.Fatalf("read ack: %v", err)
+	}
+
+	// Trigger shutdown and measure how long the attach handler takes to return.
+	start := time.Now()
+	cancel()
+
+	select {
+	case serveErr := <-errCh:
+		elapsed := time.Since(start)
+		if elapsed > 500*time.Millisecond {
+			t.Fatalf("shutdown took %s, must be < 500ms", elapsed)
+		}
+		if serveErr != nil {
+			t.Errorf("Serve returned error: %v", serveErr)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Serve did not return within 5s after cancel")
+	}
+}
+
 // With inherited-lock PID file, the file is never deleted (flock+unlink race prevention).
 // Instead, the lock is released on exit — IsHeld becomes false.
 
