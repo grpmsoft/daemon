@@ -217,8 +217,10 @@ func (d *Daemon) Stop(ctx context.Context) error {
 				// Wait for lock release (daemon exiting). Respects ctx.
 				if waitErr := waitForLockRelease(ctx, d.pids, 10*time.Second); waitErr == nil {
 					return nil
+				} else if ctx.Err() != nil {
+					return ctx.Err()
 				}
-				// Timeout waiting — fall through to kill.
+				// Graceful timeout expired — fall through to kill.
 			} else if ctx.Err() != nil {
 				// ctx cancelled — don't escalate to kill, just return.
 				return ctx.Err()

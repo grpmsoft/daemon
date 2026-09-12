@@ -52,7 +52,10 @@ func EnsureRunning(ctx context.Context, cfg Config, binary string, args []string
 
 	port, startErr := d.startWithLock(ctx, binary, args, lock)
 	if startErr != nil {
-		lock.Release()
+		// Close fd only (not LOCK_UN) — if child was spawned and shares the
+		// OFD, LOCK_UN would drop the lock for both. Close is safe: child
+		// keeps the lock via its inherited fd copy.
+		_ = lock.File().Close()
 		return 0, fmt.Errorf("ensure running: start daemon: %w", startErr)
 	}
 
@@ -78,12 +81,23 @@ func waitForPort(ctx context.Context, pidPath string, timeout time.Duration) (in
 			return 0, fmt.Errorf("ensure running: %w: waiting for daemon to write port", ErrStartTimeout)
 		}
 
+		// Try to read valid port data.
 		data, err := pidlock.ReadLocked(pidPath)
-		if err == nil && len(data) > 2 { // skip empty or "{}"
+		if err == nil && len(data) > 2 {
 			info, parseErr := parsePIDData(data)
 			if parseErr == nil && info.Port > 0 {
 				return info.Port, nil
 			}
+		}
+
+		// N12: if the holder died (parent crashed after truncate), the lock
+		// is now free. Try to acquire it — if we get it, WE become the starter.
+		if lock, tryErr := pidlock.TryLock(pidPath); tryErr == nil {
+			// Lock is free — previous holder died. Return sentinel so caller
+			// can restart the spawn. For now, release and return timeout
+			// (caller will retry EnsureRunning on next call).
+			lock.Release()
+			return 0, fmt.Errorf("ensure running: %w: holder died during spawn", ErrStartTimeout)
 		}
 
 		time.Sleep(100 * time.Millisecond)
