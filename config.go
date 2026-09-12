@@ -68,6 +68,11 @@ type Config struct {
 	// before initiating a graceful shutdown. Zero means never auto-shutdown.
 	IdleTimeout time.Duration `json:"idleTimeout"`
 
+	// Dir is the working directory for the spawned daemon process.
+	// Empty means DataDir. Prevents the daemon from holding the parent's
+	// CWD (which may be deleted or unmounted after start).
+	Dir string `json:"dir"`
+
 	// RequireToken, when true, requires the bearer token for the application
 	// handler (everything outside /health and /daemon/*). Default false so
 	// curl debugging of the app handler keeps working. MCP deployments
@@ -104,6 +109,9 @@ func (c *Config) applyDefaults() {
 	if c.Binary == "" {
 		bin, _ := os.Executable()
 		c.Binary = bin
+	}
+	if c.Dir == "" {
+		c.Dir = c.DataDir
 	}
 }
 

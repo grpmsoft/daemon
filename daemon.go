@@ -269,6 +269,7 @@ func (d *Daemon) startWithLock(ctx context.Context, lock *pidlock.Lock) (int, er
 	}
 
 	cmd := exec.Command(d.cfg.Binary, d.cfg.Args...) //nolint:gosec // binary from trusted caller
+	cmd.Dir = d.cfg.Dir
 	cmd.Stdout = logF
 	cmd.Stderr = logF
 	cmd.SysProcAttr = detachedProcAttr()
