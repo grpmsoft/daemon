@@ -342,12 +342,13 @@ func TestDaemon_Stop_DeadProcess_Idempotent(t *testing.T) {
 	}
 }
 
-func TestDaemon_Stop_AliveProcess_KillsAndClears(t *testing.T) {
+func TestDaemon_Stop_AliveProcess_KillsProcess(t *testing.T) {
 	const pid = 12345
-	pids := &pidStoreMock{saved: &PIDInfo{PID: pid, Port: 8080}, aliveResult: true}
+	pids := &pidStoreMock{saved: &PIDInfo{PID: pid, Port: 0}, aliveResult: true}
 	procs := &mockProcessManager{aliveResult: true}
 	d := newMockDaemon(pids, procs, &mockHealthChecker{})
 
+	// Port=0 → HTTP shutdown skipped → direct KillProcess.
 	err := d.Stop(context.Background())
 
 	if err != nil {
@@ -355,9 +356,6 @@ func TestDaemon_Stop_AliveProcess_KillsAndClears(t *testing.T) {
 	}
 	if procs.killCallCount != 1 {
 		t.Errorf("KillProcess must be called once, got %d", procs.killCallCount)
-	}
-	if pids.clearCallCount != 1 {
-		t.Errorf("Clear must be called once, got %d", pids.clearCallCount)
 	}
 }
 

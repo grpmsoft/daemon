@@ -194,24 +194,42 @@ func (d *Daemon) waitForPIDFile(ctx context.Context, expectedPID int) error {
 // Stop reads the PID file, verifies the process identity (PID + binary path),
 // kills the daemon process, and clears the PID file. If the PID has been
 // recycled to a different process, the stale PID file is cleared without killing.
-func (d *Daemon) Stop(_ context.Context) error {
+func (d *Daemon) Stop(ctx context.Context) error {
 	data, err := d.pids.Load()
 	if err != nil {
-		// No PID file = not running. Idempotent: return nil.
 		return nil
 	}
 
-	// Lock-based identity: if lock not held, daemon is dead.
 	if !d.pids.IsAlive() {
 		return nil
 	}
 
-	if err := d.procs.KillProcess(data.PID); err != nil {
-		return fmt.Errorf("kill daemon %s (pid %d): %w", d.cfg.Name, data.PID, err)
+	// Try graceful shutdown via HTTP first (works on all platforms,
+	// allows deferred cleanup to run, children like gopls to exit cleanly).
+	if data.Port > 0 {
+		shutdownURL := fmt.Sprintf("http://127.0.0.1:%d/daemon/shutdown", data.Port)
+		reqCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		req, reqErr := http.NewRequestWithContext(reqCtx, http.MethodPost, shutdownURL, nil)
+		if reqErr == nil {
+			client := &http.Client{Timeout: 5 * time.Second}
+			if resp, doErr := client.Do(req); doErr == nil {
+				_ = resp.Body.Close()
+				// Wait for process to exit gracefully.
+				deadline := time.Now().Add(10 * time.Second)
+				for time.Now().Before(deadline) {
+					if !d.pids.IsAlive() {
+						return nil
+					}
+					time.Sleep(200 * time.Millisecond)
+				}
+			}
+		}
 	}
 
-	if err := d.pids.Clear(); err != nil {
-		return fmt.Errorf("clear pid file after stop: %w", err)
+	// Fallback: force kill (SIGTERM→SIGKILL on Unix, TerminateProcess on Windows).
+	if err := d.procs.KillProcess(data.PID); err != nil {
+		return fmt.Errorf("kill daemon %s (pid %d): %w", d.cfg.Name, data.PID, err)
 	}
 
 	return nil
@@ -365,23 +383,9 @@ func Serve(ctx context.Context, cfg Config, handler http.Handler) error {
 	}
 
 	ct := NewConnTracker()
+	shutdownCh := make(chan struct{}, 1)
 
-	mux := http.NewServeMux()
-	mux.Handle(cfg.HealthPath, defaultHealthHandler(cfg.Name, startTime))
-	mux.HandleFunc("POST /daemon/connect", func(w http.ResponseWriter, r *http.Request) {
-		ct.Connect()
-		fmt.Fprintf(os.Stderr, "[daemon] agent connected (active: %d, remote: %s)\n", ct.Active(), r.RemoteAddr)
-		w.WriteHeader(http.StatusNoContent)
-	})
-	mux.HandleFunc("POST /daemon/disconnect", func(w http.ResponseWriter, r *http.Request) {
-		ct.Disconnect()
-		fmt.Fprintf(os.Stderr, "[daemon] agent disconnected (active: %d, remote: %s)\n", ct.Active(), r.RemoteAddr)
-		w.WriteHeader(http.StatusNoContent)
-	})
-	if handler != nil {
-		mux.Handle("/", handler)
-	}
-
+	mux := buildDaemonMux(cfg, ct, shutdownCh, handler, startTime)
 	server := &http.Server{
 		Handler:           loopbackGuard(mux, port),
 		ReadHeaderTimeout: 10 * time.Second,
@@ -419,7 +423,23 @@ func Serve(ctx context.Context, cfg Config, handler http.Handler) error {
 		},
 	)
 
-	// Actor 3: Idle auto-shutdown timer (only if configured).
+	// Actor 3: HTTP shutdown endpoint (cross-platform graceful stop).
+	shutdownActorCtx, shutdownActorCancel := context.WithCancel(context.Background())
+	g.Add(
+		func() error {
+			select {
+			case <-shutdownActorCtx.Done():
+				return shutdownActorCtx.Err()
+			case <-shutdownCh:
+				return nil
+			}
+		},
+		func(error) {
+			shutdownActorCancel()
+		},
+	)
+
+	// Actor 4: Idle auto-shutdown timer (only if configured).
 	if cfg.IdleTimeout > 0 {
 		idleCtx, idleCancel := context.WithCancel(context.Background())
 		g.Add(
@@ -452,6 +472,34 @@ func Serve(ctx context.Context, cfg Config, handler http.Handler) error {
 	}
 
 	return nil
+}
+
+// buildDaemonMux creates the HTTP mux with health, connect/disconnect, shutdown endpoints.
+func buildDaemonMux(cfg Config, ct *ConnTracker, shutdownCh chan struct{}, handler http.Handler, startTime time.Time) *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.Handle(cfg.HealthPath, defaultHealthHandler(cfg.Name, startTime))
+	mux.HandleFunc("POST /daemon/connect", func(w http.ResponseWriter, r *http.Request) {
+		ct.Connect()
+		fmt.Fprintf(os.Stderr, "[daemon] agent connected (active: %d, remote: %s)\n", ct.Active(), r.RemoteAddr)
+		w.WriteHeader(http.StatusNoContent)
+	})
+	mux.HandleFunc("POST /daemon/disconnect", func(w http.ResponseWriter, r *http.Request) {
+		ct.Disconnect()
+		fmt.Fprintf(os.Stderr, "[daemon] agent disconnected (active: %d, remote: %s)\n", ct.Active(), r.RemoteAddr)
+		w.WriteHeader(http.StatusNoContent)
+	})
+	mux.HandleFunc("POST /daemon/shutdown", func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprintf(os.Stderr, "[daemon] shutdown requested\n")
+		w.WriteHeader(http.StatusAccepted)
+		select {
+		case shutdownCh <- struct{}{}:
+		default:
+		}
+	})
+	if handler != nil {
+		mux.Handle("/", handler)
+	}
+	return mux
 }
 
 // acquireServeLock obtains the PID file lock for Serve.
