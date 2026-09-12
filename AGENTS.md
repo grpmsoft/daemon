@@ -4,7 +4,7 @@
 
 daemon is a Pure Go cross-platform daemon lifecycle library. It is published
 under the [grpmsoft](https://github.com/grpmsoft) organization and consumed by
-[GODE](https://github.com/goco-ai/gode) (headless IDE) for shared gopls daemon
+GLIDE (headless IDE, codename GODE) for shared gopls daemon
 management.
 
 It handles the full daemon lifecycle: start, stop, restart, status, health
@@ -153,7 +153,7 @@ easy to mock. See daemon_test.go for examples.
 
 | Repo | Relationship |
 |------|-------------|
-| [gode](https://github.com/goco-ai/gode) | Consumer -- shared gopls daemon management |
+| GLIDE (codename GODE) | Consumer -- shared gopls daemon management |
 | [grpmsoft](https://github.com/grpmsoft) | Parent organization |
 
 ## Development

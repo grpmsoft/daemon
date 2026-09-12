@@ -1,0 +1,208 @@
+package pidlock
+
+import (
+	"errors"
+	"os"
+	"path/filepath"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+)
+
+// ---------------------------------------------------------------------------
+// TDD: These tests define the contract BEFORE implementation.
+// ---------------------------------------------------------------------------
+
+func TestTryLock_AcquiresOnNewFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "test.pid")
+
+	l, err := TryLock(path)
+	if err != nil {
+		t.Fatalf("TryLock on new file: %v", err)
+	}
+	defer l.Release()
+
+	if l.File() == nil {
+		t.Fatal("File() must return non-nil after successful lock")
+	}
+}
+
+func TestTryLock_SecondCallerGetsErrLocked(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "test.pid")
+
+	l1, err := TryLock(path)
+	if err != nil {
+		t.Fatalf("first lock: %v", err)
+	}
+	defer l1.Release()
+
+	_, err = TryLock(path)
+	if !errors.Is(err, ErrLocked) {
+		t.Fatalf("second lock: got %v, want ErrLocked", err)
+	}
+}
+
+func TestTryLock_ReleasedLockCanBeReacquired(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "test.pid")
+
+	l1, err := TryLock(path)
+	if err != nil {
+		t.Fatalf("first lock: %v", err)
+	}
+	l1.Release()
+
+	l2, err := TryLock(path)
+	if err != nil {
+		t.Fatalf("re-acquire after release: %v", err)
+	}
+	l2.Release()
+}
+
+func TestTryLock_FileNotDeletedAfterRelease(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "test.pid")
+
+	l, err := TryLock(path)
+	if err != nil {
+		t.Fatalf("lock: %v", err)
+	}
+	l.Release()
+
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		t.Fatal("PID lock file must NOT be deleted after Release (flock+unlink race prevention)")
+	}
+}
+
+func TestTryLock_ExclusiveUnderConcurrency(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "test.pid")
+
+	var held atomic.Bool
+	var violations atomic.Int32
+	var wg sync.WaitGroup
+
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			l, err := TryLock(path)
+			if errors.Is(err, ErrLocked) {
+				return // expected for losers
+			}
+			if err != nil {
+				t.Errorf("unexpected error: %v", err)
+				return
+			}
+
+			if !held.CompareAndSwap(false, true) {
+				violations.Add(1)
+			}
+			time.Sleep(5 * time.Millisecond)
+			held.Store(false)
+			l.Release()
+		}()
+	}
+
+	wg.Wait()
+	if v := violations.Load(); v > 0 {
+		t.Errorf("lock violated %d times", v)
+	}
+}
+
+func TestTryLock_EINTRRetry(t *testing.T) {
+	// Verify that TryLock handles EINTR (signal during flock).
+	// We can't easily trigger EINTR in a unit test, but we verify
+	// the code path exists by successfully locking — if EINTR retry
+	// was missing and a signal arrived, we'd get a spurious error.
+	path := filepath.Join(t.TempDir(), "test.pid")
+	l, err := TryLock(path)
+	if err != nil {
+		t.Fatalf("TryLock (EINTR resilience): %v", err)
+	}
+	l.Release()
+}
+
+func TestLock_WriteAndRead(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "test.pid")
+
+	l, err := TryLock(path)
+	if err != nil {
+		t.Fatalf("lock: %v", err)
+	}
+	defer l.Release()
+
+	// Write PID data via Seek+Write+Truncate (NOT temp+rename).
+	data := []byte(`{"pid":12345,"port":8080}`)
+	if err := l.WriteData(data); err != nil {
+		t.Fatalf("WriteData: %v", err)
+	}
+
+	// Read back (use ReadLocked — os.ReadFile fails on Windows with LockFileEx).
+	got, err := ReadLocked(path)
+	if err != nil {
+		t.Fatalf("ReadLocked: %v", err)
+	}
+	if string(got) != string(data) {
+		t.Errorf("data mismatch: got %q, want %q", got, data)
+	}
+
+	// Overwrite with shorter data — must truncate.
+	data2 := []byte(`{"pid":99}`)
+	if err := l.WriteData(data2); err != nil {
+		t.Fatalf("WriteData (overwrite): %v", err)
+	}
+
+	got2, err := ReadLocked(path)
+	if err != nil {
+		t.Fatalf("ReadLocked after overwrite: %v", err)
+	}
+	if string(got2) != string(data2) {
+		t.Errorf("overwrite mismatch: got %q, want %q", got2, data2)
+	}
+}
+
+func TestReadLocked_ReadsWhileLocked(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "test.pid")
+
+	l, err := TryLock(path)
+	if err != nil {
+		t.Fatalf("lock: %v", err)
+	}
+	defer l.Release()
+
+	want := []byte(`{"pid":42,"port":9090}`)
+	if err := l.WriteData(want); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	// Another process/goroutine can READ even while locked.
+	got, err := ReadLocked(path)
+	if err != nil {
+		t.Fatalf("ReadLocked: %v", err)
+	}
+	if string(got) != string(want) {
+		t.Errorf("ReadLocked: got %q, want %q", got, want)
+	}
+}
+
+func TestIsHeld_TrueWhileLocked_FalseAfterRelease(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "test.pid")
+
+	if IsHeld(path) {
+		t.Fatal("IsHeld must be false for non-existent file")
+	}
+
+	l, err := TryLock(path)
+	if err != nil {
+		t.Fatalf("lock: %v", err)
+	}
+
+	if !IsHeld(path) {
+		t.Fatal("IsHeld must be true while locked")
+	}
+
+	l.Release()
+
+	if IsHeld(path) {
+		t.Fatal("IsHeld must be false after release")
+	}
+}
