@@ -688,17 +688,11 @@ func buildDaemonMux(cfg Config, ct *ConnTracker, shutdownCh chan struct{}, handl
 			f.Flush()
 		}
 
-		// Block until the client disconnects (r.Context cancelled by TCP close
-		// or server.Shutdown via BaseContext) or daemon shutdown is signalled.
-		select {
-		case <-r.Context().Done():
-		case <-shutdownCh:
-			// Re-push so shutdown actor also observes it.
-			select {
-			case shutdownCh <- struct{}{}:
-			default:
-			}
-		}
+		// Block until the client disconnects. r.Context() is cancelled by:
+		// - TCP close (client crash/exit) — kernel closes socket
+		// - server.Shutdown (via cancelBase which cancels BaseContext)
+		// No need to listen on shutdownCh — cancelBase() already propagates.
+		<-r.Context().Done()
 		fmt.Fprintf(os.Stderr, "[daemon] agent detached (active: %d, remote: %s)\n", ct.Active()-1, r.RemoteAddr)
 	})
 
