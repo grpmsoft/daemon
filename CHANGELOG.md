@@ -5,6 +5,38 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-09-12
+
+### Breaking Changes
+
+- `Start(ctx, binary, args) error` → `Start(ctx) (*Info, error)` — binary and args moved to `Config`
+- `Restart(ctx, binary, args) error` → `Restart(ctx) (*Info, error)` — binary and args moved to `Config`
+- `EnsureRunning(ctx, cfg, binary, args) (int, error)` → method `d.EnsureRunning(ctx) (*Info, error)`; package-level `EnsureRunning(ctx, cfg) (int, error)` kept as convenience wrapper
+- `KillProcess(pid int) error` → `KillProcess(ctx context.Context, pid int, grace time.Duration) error` — context-aware with grace period
+- `Config` gains `Binary` and `Args` fields — daemon identity is now in config, not per-call
+- `Stop(ctx)` now serialized on startup lock — all lifecycle mutations use the same lock
+
+### Added
+
+- Unified lock protocol: all lifecycle mutations (`Start`, `Stop`, `Restart`, `EnsureRunning`) serialize on the startup lock (ADR-002)
+- `startLocked`/`stopLocked` internal methods — public methods never call other public methods (prevents double-lock deadlocks)
+- `Config.Binary` (`string`) — executable path for the daemon process, defaults to `os.Executable()` when empty
+- `Config.Args` (`[]string`) — arguments passed to the child process in `Start()`/`Restart()`
+- `buildInfo()` helper — consistent `*Info` construction from `PIDInfo`
+- `acquireStartupLock()` helper — encapsulates lock file acquisition with context
+- Proxy: `IsHeld` check before dialing — dead daemon returns `ErrNotRunning` instead of connection refused
+- `InheritFD`: improved EWOULDBLOCK handling with tests
+- Windows `IsHeld`: uses `OPEN_EXISTING` (no empty file creation)
+- CI: actions upgraded to Node 24 (`checkout@v7`, `setup-go@v7`, `codecov@v7`, `golangci-lint@v9`)
+- Dependabot for GitHub Actions
+- Orphan child killed on start failure (D8)
+
+### Changed
+
+- `EnsureRunning` is now a method on `*Daemon` (testable with `NewWithDeps`); package-level wrapper calls it internally
+- All mutating methods return `*Info` for consistency (PID, port, start time in one call)
+- `Start()` returns error if daemon is already running (not idempotent — use `EnsureRunning` for idempotent start)
+
 ## [0.2.0] - 2026-09-12
 
 ### Breaking Changes
@@ -99,6 +131,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CI: GitHub Actions (build/test/lint/fmt on 3 OS, codecov OIDC)
 - Docs: README, CONTRIBUTING, SECURITY, CODE_OF_CONDUCT, AGENTS, llms.txt
 
+[0.3.0]: https://github.com/grpmsoft/daemon/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/grpmsoft/daemon/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/grpmsoft/daemon/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/grpmsoft/daemon/releases/tag/v0.1.0

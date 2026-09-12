@@ -45,19 +45,22 @@ func main() {
     cfg := daemon.Config{
         Name:    "myapp",
         DataDir: ".myapp",
+        Binary:  "", // empty = os.Executable()
+        Args:    []string{"serve"},
     }
 
     d := daemon.New(cfg)
 
     // Start a background daemon.
-    binary, _ := os.Executable()
-    if err := d.Start(context.Background(), binary, []string{"serve"}); err != nil {
+    info, err := d.Start(context.Background())
+    if err != nil {
         fmt.Fprintf(os.Stderr, "start: %v\n", err)
         os.Exit(1)
     }
+    fmt.Printf("Started: PID %d, Port %d\n", info.PID, info.Port)
 
     // Check status.
-    info, _ := d.Status()
+    info, _ = d.Status()
     fmt.Printf("Status: %s, PID: %d, Port: %d\n", info.Status, info.PID, info.Port)
 
     // Stop the daemon.
@@ -112,7 +115,7 @@ func main() {
 
 ```go
 // In your CLI's "mcp serve" command:
-port, err := daemon.EnsureRunning(ctx, cfg, binary, args)
+port, err := daemon.EnsureRunning(ctx, cfg)
 if err != nil {
     return err
 }
@@ -125,15 +128,23 @@ return daemon.Proxy(ctx, cfg, daemon.ProxyOptions{MCPPath: "/mcp"})
 
 `EnsureRunning` is the main entry point for consumers. It checks if a daemon is already running and returns its port. If not, it starts a new one and waits for the health check to pass.
 
+Available as both a method on `*Daemon` (returns `*Info`) and a package-level convenience function (returns port as `int`):
+
 ```go
+// Package-level convenience (creates a Daemon internally):
 port, err := daemon.EnsureRunning(ctx, daemon.Config{
     Name:    "myapp",
     DataDir: ".myapp",
-}, binary, []string{"serve"})
+    Args:    []string{"serve"},
+})
 if err != nil {
     return err
 }
 fmt.Printf("Daemon ready on port %d\n", port)
+
+// Method form (when you already have a Daemon instance):
+d := daemon.New(cfg)
+info, err := d.EnsureRunning(ctx)
 ```
 
 Race-safe: if two agents call `EnsureRunning` simultaneously and one wins the start, the other detects the running daemon via the PID file and returns its port.
@@ -144,11 +155,13 @@ Race-safe: if two agents call `EnsureRunning` simultaneously and one wins the st
 |-------|------|---------|-------------|
 | `Name` | `string` | (required) | Application name. Used for PID file naming and health response |
 | `DataDir` | `string` | (required) | Directory for runtime files (PID, logs) |
+| `Binary` | `string` | `os.Executable()` | Executable path for the daemon process. Empty uses current binary |
+| `Args` | `[]string` | `nil` | Arguments passed to the child process in `Start()`/`Restart()` |
 | `Timeout` | `time.Duration` | `30s` | How long `Start()` waits for health check to pass |
 | `HealthPath` | `string` | `"/health"` | HTTP path for the health endpoint |
 | `IdleTimeout` | `time.Duration` | `0` (disabled) | Auto-shutdown after this duration with zero connections |
 
-**Note:** `DataDir` will contain a persistent `<Name>.lock` file used to serialize concurrent `EnsureRunning` calls. After a binary upgrade (`go install`), `EnsureRunning` returns the existing daemon's port — call `Restart()` to pick up the new binary.
+**Note:** `DataDir` will contain a persistent `<Name>.lock` file used to serialize concurrent `EnsureRunning` calls. After a binary upgrade (`go install`), `EnsureRunning` returns the existing daemon's port -- call `Restart()` to pick up the new binary. Set `Binary` and `Args` in Config once; all lifecycle methods (`Start`, `Stop`, `Restart`, `EnsureRunning`) use them automatically.
 
 ## run.Group
 
