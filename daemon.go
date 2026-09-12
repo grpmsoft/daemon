@@ -11,7 +11,7 @@
 //
 //	d := daemon.New(daemon.Config{Name: "myapp", DataDir: ".myapp"})
 //	d.Start(ctx, binary, args) // spawn detached background process
-//	d.Stop()                   // graceful shutdown
+//	d.Stop(ctx)                // graceful shutdown
 //	d.Status()                 // check if running, get info
 package daemon
 
@@ -200,7 +200,7 @@ func (d *Daemon) waitForPIDFile(ctx context.Context, expectedPID int) error {
 // Stop reads the PID file, verifies the process identity (PID + binary path),
 // kills the daemon process, and clears the PID file. If the PID has been
 // recycled to a different process, the stale PID file is cleared without killing.
-func (d *Daemon) Stop() error {
+func (d *Daemon) Stop(_ context.Context) error {
 	data, err := d.pids.Load()
 	if err != nil {
 		// No PID file = not running. Idempotent: return nil.
@@ -225,7 +225,7 @@ func (d *Daemon) Stop() error {
 
 // Restart stops a running daemon (if any) and starts a new one.
 func (d *Daemon) Restart(ctx context.Context, binary string, args []string) error {
-	_ = d.Stop()
+	_ = d.Stop(ctx)
 	return d.Start(ctx, binary, args)
 }
 

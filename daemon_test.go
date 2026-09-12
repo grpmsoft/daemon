@@ -318,7 +318,7 @@ func TestDaemon_Stop_NoPIDFile_Idempotent(t *testing.T) {
 	pids := &pidStoreMock{loadErr: errors.New("pid file not found")}
 	d := newMockDaemon(pids, &mockProcessManager{}, &mockHealthChecker{})
 
-	err := d.Stop()
+	err := d.Stop(context.Background())
 
 	// Stop on a stopped daemon is idempotent — returns nil.
 	if err != nil {
@@ -331,7 +331,7 @@ func TestDaemon_Stop_DeadProcess_Idempotent(t *testing.T) {
 	procs := &mockProcessManager{aliveResult: false}
 	d := newMockDaemon(pids, procs, &mockHealthChecker{})
 
-	err := d.Stop()
+	err := d.Stop(context.Background())
 
 	// Dead process (lock not held) → idempotent nil, no kill.
 	if err != nil {
@@ -348,7 +348,7 @@ func TestDaemon_Stop_AliveProcess_KillsAndClears(t *testing.T) {
 	procs := &mockProcessManager{aliveResult: true}
 	d := newMockDaemon(pids, procs, &mockHealthChecker{})
 
-	err := d.Stop()
+	err := d.Stop(context.Background())
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -369,7 +369,7 @@ func TestDaemon_Stop_KillFails_ReturnsError(t *testing.T) {
 	}
 	d := newMockDaemon(pids, procs, &mockHealthChecker{})
 
-	err := d.Stop()
+	err := d.Stop(context.Background())
 
 	if err == nil {
 		t.Fatal("expected error, got nil")
@@ -678,7 +678,7 @@ func TestDaemon_Stop_StalePID_Idempotent(t *testing.T) {
 	procs := &mockProcessManager{aliveResult: false}
 	d := newMockDaemon(pids, procs, &mockHealthChecker{})
 
-	err := d.Stop()
+	err := d.Stop(context.Background())
 	if err != nil {
 		t.Fatalf("Stop must be idempotent for stale PID: %v", err)
 	}
