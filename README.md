@@ -182,6 +182,8 @@ go test ./...
 
 Contributions are welcome. Please open an issue or pull request on [GitHub](https://github.com/grpmsoft/daemon).
 
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development guidelines and [CHANGELOG.md](CHANGELOG.md) for release history.
+
 ## License
 
 MIT License. See [LICENSE](LICENSE).
