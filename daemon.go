@@ -22,6 +22,8 @@ package daemon
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/subtle"
 	"encoding/json/v2"
 	"errors"
 	"fmt"
@@ -199,6 +201,10 @@ func (d *Daemon) stopLocked(ctx context.Context) error {
 		reqCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		req, reqErr := http.NewRequestWithContext(reqCtx, http.MethodPost, shutdownURL, nil)
 		if reqErr == nil {
+			// Send bearer token if available (v0.3.1+ daemon requires it).
+			if data.Token != "" {
+				req.Header.Set("Authorization", "Bearer "+data.Token)
+			}
 			client := &http.Client{}
 			resp, doErr := client.Do(req)
 			cancel()
@@ -502,6 +508,12 @@ func Serve(ctx context.Context, cfg Config, handler http.Handler) error {
 	}
 	port := ln.Addr().(*net.TCPAddr).Port
 
+	// Generate a control-plane bearer token. Written to the PID file (0600 by
+	// pidlock.TryLock), so only the file owner can read it. Clients (Proxy,
+	// stopLocked) read the token from the PID file and send it in Authorization
+	// headers. rand.Text uses crypto/rand (Go 1.24+).
+	token := rand.Text()
+
 	// Write PID data through the lock (Seek+Truncate, preserves inode).
 	binaryPath, _ := os.Executable()
 	pidData := PIDInfo{
@@ -510,6 +522,7 @@ func Serve(ctx context.Context, cfg Config, handler http.Handler) error {
 		Name:      cfg.Name,
 		Binary:    binaryPath,
 		StartTime: startTime,
+		Token:     token,
 	}
 	pidJSON, _ := json.Marshal(pidData)
 	if err := lock.WriteData(pidJSON); err != nil {
@@ -525,7 +538,7 @@ func Serve(ctx context.Context, cfg Config, handler http.Handler) error {
 
 	mux := buildDaemonMux(cfg, ct, shutdownCh, handler, startTime)
 	server := &http.Server{
-		Handler:           loopbackGuard(mux, port),
+		Handler:           loopbackGuard(authGuard(mux, token, cfg.RequireToken, cfg.HealthPath), port),
 		ReadHeaderTimeout: 10 * time.Second,
 		// BaseContext derives each request's context from serveCtx.
 		// When server.Shutdown is called, in-flight request contexts are cancelled,
@@ -533,6 +546,13 @@ func Serve(ctx context.Context, cfg Config, handler http.Handler) error {
 		BaseContext: func(_ net.Listener) context.Context { return serveCtx },
 	}
 
+	return runServeGroup(ctx, server, ln, shutdownCh, ct, cfg.IdleTimeout)
+}
+
+// runServeGroup sets up the actor group (HTTP server, signal handler, shutdown
+// endpoint, idle timer) and runs them. Extracted from Serve to keep both
+// functions within the funlen limit.
+func runServeGroup(ctx context.Context, server *http.Server, ln net.Listener, shutdownCh chan struct{}, ct *ConnTracker, idleTimeout time.Duration) error {
 	sigCtx, sigStop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 
 	var g Group
@@ -582,11 +602,11 @@ func Serve(ctx context.Context, cfg Config, handler http.Handler) error {
 	)
 
 	// Actor 4: Idle auto-shutdown timer (only if configured).
-	if cfg.IdleTimeout > 0 {
+	if idleTimeout > 0 {
 		idleCtx, idleCancel := context.WithCancel(context.Background())
 		g.Add(
 			func() error {
-				return waitForIdle(idleCtx, ct, cfg.IdleTimeout)
+				return waitForIdle(idleCtx, ct, idleTimeout)
 			},
 			func(error) {
 				idleCancel()
@@ -596,24 +616,12 @@ func Serve(ctx context.Context, cfg Config, handler http.Handler) error {
 
 	runErr := g.Run()
 
-	// Lock is released by deferred lock.Release() — kernel drops flock/share-mode.
-	// No explicit PID file cleanup needed: the lock IS the identity.
-	// The file stays on disk (intentional — flock+unlink race prevention).
-	var clearErr error
-
 	// context.Canceled from signal handler is a clean shutdown.
 	if errors.Is(runErr, context.Canceled) {
-		runErr = nil
+		return nil
 	}
 
-	if runErr != nil {
-		return runErr
-	}
-	if clearErr != nil {
-		return fmt.Errorf("clear pid file on shutdown: %w", clearErr)
-	}
-
-	return nil
+	return runErr
 }
 
 // waitForLockRelease polls IsAlive under ctx until the lock is released or deadline.
@@ -781,6 +789,46 @@ func waitForIdle(ctx context.Context, ct *ConnTracker, timeout time.Duration) er
 			continue
 		}
 	}
+}
+
+// authGuard is middleware that requires a bearer token for control-plane
+// endpoints (/daemon/*). /health stays unauthenticated (used by WaitUntilReady
+// and external probes). When requireApp is true, the token is also required for
+// the application handler (everything outside /health and /daemon/*).
+//
+// Chain order: loopbackGuard -> authGuard -> mux.
+func authGuard(next http.Handler, token string, requireApp bool, healthPath string) http.Handler {
+	tokenBytes := []byte(token)
+
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := r.URL.Path
+
+		// Health endpoint is always unauthenticated (used by WaitUntilReady
+		// and external probes).
+		needsAuth := false
+		if strings.HasPrefix(path, "/daemon/") {
+			needsAuth = true
+		} else if requireApp && path != healthPath {
+			needsAuth = true
+		}
+
+		if needsAuth {
+			auth := r.Header.Get("Authorization")
+			if !strings.HasPrefix(auth, "Bearer ") {
+				w.Header().Set("WWW-Authenticate", "Bearer")
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			got := []byte(strings.TrimPrefix(auth, "Bearer "))
+			if subtle.ConstantTimeCompare(got, tokenBytes) != 1 {
+				w.Header().Set("WWW-Authenticate", "Bearer")
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+		}
+
+		next.ServeHTTP(w, r)
+	})
 }
 
 // loopbackGuard rejects HTTP requests whose Host header does not resolve to

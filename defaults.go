@@ -36,6 +36,7 @@ func (a *pidStoreAdapter) Load() (PIDInfo, error) {
 		Name:      data.Name,
 		Binary:    data.Binary,
 		StartTime: data.StartTime,
+		Token:     data.Token,
 	}, nil
 }
 

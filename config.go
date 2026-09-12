@@ -67,6 +67,12 @@ type Config struct {
 	// IdleTimeout is how long the daemon waits with zero active connections
 	// before initiating a graceful shutdown. Zero means never auto-shutdown.
 	IdleTimeout time.Duration `json:"idleTimeout"`
+
+	// RequireToken, when true, requires the bearer token for the application
+	// handler (everything outside /health and /daemon/*). Default false so
+	// curl debugging of the app handler keeps working. MCP deployments
+	// should set this to true.
+	RequireToken bool `json:"requireToken"`
 }
 
 // Validate checks the configuration for invalid values.
@@ -129,6 +135,7 @@ type PIDInfo struct {
 	Name      string    `json:"name"`
 	Binary    string    `json:"binary"`
 	StartTime time.Time `json:"startTime"`
+	Token     string    `json:"token,omitempty"`
 }
 
 // ProcessManager abstracts platform-specific process lifecycle operations.
