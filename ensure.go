@@ -3,6 +3,10 @@ package daemon
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
+
+	"github.com/grpmsoft/daemon/internal"
 )
 
 // EnsureRunning checks if a daemon is already running for this config.
@@ -12,13 +16,28 @@ import (
 // This is the main entry point for consumers like "gode mcp serve" --
 // it transparently handles "start if needed" logic.
 //
-// Race handling: if two agents call EnsureRunning simultaneously and
-// Start fails with "already running", it falls back to reading the
-// existing daemon's status. The PID file acts as a natural lock.
+// Concurrency: an exclusive file lock serializes the check→spawn→ready
+// sequence across processes. If two agents call EnsureRunning simultaneously,
+// one acquires the lock and starts the daemon; the other blocks until the
+// lock is released and then finds the daemon already running.
 func EnsureRunning(ctx context.Context, cfg Config, binary string, args []string) (int, error) {
+	cfg.applyDefaults()
+
+	if err := os.MkdirAll(cfg.DataDir, 0o750); err != nil {
+		return 0, fmt.Errorf("ensure running: create data dir: %w", err)
+	}
+
+	// Serialize concurrent startup attempts with an exclusive file lock.
+	lockPath := filepath.Join(cfg.DataDir, cfg.Name+".lock")
+	lockFile, err := internal.Lock(lockPath)
+	if err != nil {
+		return 0, fmt.Errorf("ensure running: acquire lock: %w", err)
+	}
+	defer internal.Unlock(lockFile)
+
 	d := New(cfg)
 
-	// Fast path: daemon already running.
+	// Fast path: daemon already running (checked under lock).
 	if d.IsRunning() {
 		info, err := d.Status()
 		if err != nil {
@@ -29,11 +48,8 @@ func EnsureRunning(ctx context.Context, cfg Config, binary string, args []string
 		}
 	}
 
-	// Slow path: start a new daemon.
+	// Slow path: start a new daemon (still under lock).
 	if err := d.Start(ctx, binary, args); err != nil {
-		// Race condition: another agent started the daemon between our
-		// IsRunning check and Start call. If the daemon is now running,
-		// return its port instead of failing.
 		if d.IsRunning() {
 			info, statusErr := d.Status()
 			if statusErr == nil && info.Status == StatusRunning && info.Port > 0 {

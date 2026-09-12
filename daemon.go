@@ -433,9 +433,9 @@ func waitForIdle(ctx context.Context, ct *ConnTracker, timeout time.Duration) er
 func loopbackGuard(next http.Handler, port int) http.Handler {
 	allowed := map[string]bool{
 		fmt.Sprintf("127.0.0.1:%d", port): true,
-		fmt.Sprintf("localhost:%d", port):  true,
-		"127.0.0.1":                        true,
-		"localhost":                         true,
+		fmt.Sprintf("localhost:%d", port): true,
+		"127.0.0.1":                       true,
+		"localhost":                       true,
 	}
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -38,9 +38,12 @@ func StartDetached(binary string, args []string, logFile string, env []string) (
 	}
 
 	pid := cmd.Process.Pid
-	if err := cmd.Process.Release(); err != nil {
-		return pid, fmt.Errorf("release process handle: %w", err)
-	}
+
+	// Reap the child in a background goroutine to prevent zombie processes.
+	// Without Wait(), an exited child stays in the process table as a zombie
+	// while the parent (proxy) is alive. No stdout/stderr pipes exist (output
+	// goes to *os.File directly), so Wait only calls waitpid.
+	go func() { _ = cmd.Wait() }()
 
 	return pid, nil
 }
@@ -98,12 +101,37 @@ func ProcessBinaryPath(pid int) (string, error) {
 	return target, nil
 }
 
-// IsProcessAlive checks whether a process with the given PID exists.
+// IsProcessAlive checks whether a process with the given PID exists and is not a zombie.
 // On Unix, sending signal 0 checks existence without affecting the process.
+// On Linux, /proc/<pid>/stat is checked for zombie state (Z) since kill(0)
+// succeeds on zombies.
 func IsProcessAlive(pid int) bool {
 	process, err := os.FindProcess(pid)
 	if err != nil {
 		return false
 	}
-	return process.Signal(syscall.Signal(0)) == nil
+	if err := process.Signal(syscall.Signal(0)); err != nil {
+		return false
+	}
+	return !isZombie(pid)
+}
+
+// isZombie checks if a process is in zombie state via /proc/<pid>/stat.
+// Returns false on non-Linux (macOS/BSD have no /proc) — kill(0) is
+// sufficient there since zombies are reaped by the kernel differently.
+func isZombie(pid int) bool {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		return false
+	}
+	// /proc/<pid>/stat format: "pid (comm) state ..."
+	// Find the closing paren (comm can contain spaces/parens), then the state char.
+	i := len(data) - 1
+	for i >= 0 && data[i] != ')' {
+		i--
+	}
+	if i+2 < len(data) {
+		return data[i+2] == 'Z'
+	}
+	return false
 }
