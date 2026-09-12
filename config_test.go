@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"errors"
 	"testing"
 	"time"
 )
@@ -73,5 +74,37 @@ func TestConfig_ApplyDefaults_NameAndDataDirUnchanged(t *testing.T) {
 	}
 	if cfg.DataDir != "/var/run/myapp" {
 		t.Errorf("got %v, want %v", cfg.DataDir, "/var/run/myapp")
+	}
+}
+
+func TestConfig_Validate(t *testing.T) {
+	tests := []struct {
+		name    string
+		cfg     Config
+		wantErr bool
+	}{
+		{"valid", Config{Name: "app", DataDir: "/tmp"}, false},
+		{"empty name", Config{Name: "", DataDir: "/tmp"}, true},
+		{"slash in name", Config{Name: "a/b", DataDir: "/tmp"}, true},
+		{"backslash in name", Config{Name: "a\\b", DataDir: "/tmp"}, true},
+		{"dot name", Config{Name: ".", DataDir: "/tmp"}, true},
+		{"dotdot name", Config{Name: "..", DataDir: "/tmp"}, true},
+		{"empty datadir", Config{Name: "app", DataDir: ""}, true},
+		{"healthpath root", Config{Name: "app", DataDir: "/tmp", HealthPath: "/"}, true},
+		{"healthpath custom", Config{Name: "app", DataDir: "/tmp", HealthPath: "/ready"}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.cfg.Validate()
+			if tt.wantErr && err == nil {
+				t.Fatal("expected error")
+			}
+			if !tt.wantErr && err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if tt.wantErr && err != nil && !errors.Is(err, ErrInvalidConfig) {
+				t.Errorf("error must wrap ErrInvalidConfig, got %v", err)
+			}
+		})
 	}
 }

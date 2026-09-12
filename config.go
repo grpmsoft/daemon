@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -57,6 +58,25 @@ type Config struct {
 	// IdleTimeout is how long the daemon waits with zero active connections
 	// before initiating a graceful shutdown. Zero means never auto-shutdown.
 	IdleTimeout time.Duration
+}
+
+// Validate checks the configuration for invalid values.
+// Name must be a single path element (no slashes). DataDir must be non-empty.
+// HealthPath must not conflict with reserved daemon paths.
+func (c *Config) Validate() error {
+	if c.Name == "" {
+		return fmt.Errorf("%w: Name is required", ErrInvalidConfig)
+	}
+	if strings.ContainsAny(c.Name, "/\\") || c.Name == "." || c.Name == ".." {
+		return fmt.Errorf("%w: Name %q must be a single path element", ErrInvalidConfig, c.Name)
+	}
+	if c.DataDir == "" {
+		return fmt.Errorf("%w: DataDir is required", ErrInvalidConfig)
+	}
+	if c.HealthPath == "/" {
+		return fmt.Errorf("%w: HealthPath %q conflicts with root handler", ErrInvalidConfig, c.HealthPath)
+	}
+	return nil
 }
 
 func (c *Config) applyDefaults() {

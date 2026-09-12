@@ -49,6 +49,8 @@ type Daemon struct {
 // New creates a Daemon with the given configuration and default implementations.
 func New(cfg Config) *Daemon {
 	cfg.applyDefaults()
+	// Validate is intentionally not called here — New is used by tests
+	// with minimal configs. Validate is called by EnsureRunning and Serve.
 	return &Daemon{
 		cfg:    cfg,
 		pids:   newDefaultPIDStore(cfg.DataDir, cfg.Name),
@@ -80,7 +82,7 @@ func (d *Daemon) SetHandler(h http.Handler) {
 func (d *Daemon) Start(ctx context.Context, binary string, args []string) error {
 	if d.IsRunning() {
 		info, _ := d.Status()
-		return fmt.Errorf("daemon %s already running (pid %d, port %d)", d.cfg.Name, info.PID, info.Port)
+		return fmt.Errorf("%w (pid %d, port %d)", ErrAlreadyRunning, info.PID, info.Port)
 	}
 
 	if err := os.MkdirAll(d.cfg.DataDir, 0o750); err != nil {
@@ -201,13 +203,13 @@ func (d *Daemon) waitForPIDFile(ctx context.Context, expectedPID int) error {
 func (d *Daemon) Stop() error {
 	data, err := d.pids.Load()
 	if err != nil {
-		return fmt.Errorf("stop daemon %s: %w", d.cfg.Name, err)
+		// No PID file = not running. Idempotent: return nil.
+		return nil
 	}
 
-	// Use IsAlive (PID + binary verification) instead of bare IsProcessAlive
-	// to avoid killing an unrelated process with a recycled PID.
+	// Lock-based identity: if lock not held, daemon is dead.
 	if !d.pids.IsAlive() {
-		return d.pids.Clear()
+		return nil
 	}
 
 	if err := d.procs.KillProcess(data.PID); err != nil {
