@@ -146,6 +146,8 @@ Race-safe: if two agents call `EnsureRunning` simultaneously and one wins the st
 | `HealthPath` | `string` | `"/health"` | HTTP path for the health endpoint |
 | `IdleTimeout` | `time.Duration` | `0` (disabled) | Auto-shutdown after this duration with zero connections |
 
+**Note:** `DataDir` will contain a persistent `<Name>.lock` file used to serialize concurrent `EnsureRunning` calls. After a binary upgrade (`go install`), `EnsureRunning` returns the existing daemon's port — call `Restart()` to pick up the new binary.
+
 ## run.Group
 
 `Group` is a zero-dependency reimplementation of the [oklog/run](https://github.com/oklog/run) actor pattern. Start multiple concurrent actors; when any one returns, all others are interrupted.

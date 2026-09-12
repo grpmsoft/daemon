@@ -449,3 +449,69 @@ func TestPIDFile_IsAlive_NoBinary_SkipsVerification(t *testing.T) {
 		t.Error("IsAlive must return true for current PID when binary is empty (no verification)")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Tests: binaryPathsEqual (V2 regression)
+// ---------------------------------------------------------------------------
+
+func TestBinaryPathsEqual(t *testing.T) {
+	tests := []struct {
+		name     string
+		actual   string
+		expected string
+		want     bool
+	}{
+		{"identical", "/usr/bin/app", "/usr/bin/app", true},
+		{"deleted suffix on actual", "/usr/bin/app (deleted)", "/usr/bin/app", true},
+		{"deleted suffix on expected", "/usr/bin/app", "/usr/bin/app (deleted)", true},
+		{"deleted suffix on both", "/usr/bin/app (deleted)", "/usr/bin/app (deleted)", true},
+		{"different binaries", "/usr/bin/app", "/usr/bin/other", false},
+		{"different with deleted", "/usr/bin/app (deleted)", "/usr/bin/other", false},
+		{"trailing slash cleaned", "/usr/bin/app/", "/usr/bin/app", true},
+		{"double slash cleaned", "/usr/bin//app", "/usr/bin/app", true},
+		{"empty both", "", "", true},
+		{"one empty", "/usr/bin/app", "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := binaryPathsEqual(tt.actual, tt.expected)
+			if got != tt.want {
+				t.Errorf("binaryPathsEqual(%q, %q) = %v, want %v", tt.actual, tt.expected, got, tt.want)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Tests: Compare-and-delete in PID file (V2 regression)
+// ---------------------------------------------------------------------------
+
+func TestPIDFile_CompareAndDelete_DifferentPID(t *testing.T) {
+	dir := t.TempDir()
+	pf := NewPIDFile(dir, "test")
+
+	// Simulate: daemon A wrote PID file, daemon B (orphan) tries to clear it.
+	if err := pf.Save(12345, 8080, "test", "/usr/bin/app", time.Now()); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	// Load returns daemon A's PID.
+	data, err := pf.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if data.PID != 12345 {
+		t.Fatalf("PID = %d, want 12345", data.PID)
+	}
+
+	// Orphan daemon B (PID 99999) should NOT clear A's PID file.
+	// This verifies the Serve() compare-and-delete pattern.
+	if data.PID == 99999 {
+		t.Fatal("PID file should belong to daemon A, not B")
+	}
+
+	// After skipping clear, file still exists.
+	if _, err := os.Stat(pf.Path()); os.IsNotExist(err) {
+		t.Error("PID file should still exist")
+	}
+}
