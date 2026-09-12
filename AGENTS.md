@@ -69,8 +69,10 @@ internal/
   the defaults; NewWithDeps() accepts mocks for testing.
 
 - **Config** -- controls daemon behavior: Name, DataDir, Binary (default
-  os.Executable()), Args, Timeout, HealthPath, IdleTimeout. `applyDefaults()`
-  fills zero values (30s timeout, "/health" path, os.Executable() for Binary).
+  os.Executable()), Args, Timeout, HealthPath, IdleTimeout, RequireToken.
+  `applyDefaults()` fills zero values (30s timeout, "/health" path,
+  os.Executable() for Binary). RequireToken (bool, default false) gates
+  bearer token on the app handler.
 
 - **Status** -- enum (StatusStopped, StatusStarting, StatusRunning,
   StatusStopping, StatusError) with String() method.
@@ -84,7 +86,8 @@ internal/
 
 - **ConnTracker** -- atomic connection counter with idle notification channels.
   Connect() increments and resets idle timer; Disconnect() decrements and
-  signals when count drops to zero.
+  signals when count drops to zero. /daemon/attach uses TCP connection as
+  lease (kernel close = auto-disconnect).
 
 ### Key Interfaces
 
@@ -104,13 +107,16 @@ internal/
 - **NewWithDeps(Config, PIDStore, ProcessManager, HealthChecker)** -- creates a
   Daemon with explicit mocks for testing.
 - **Serve(ctx, Config, http.Handler)** -- runs as the daemon: picks free port,
-  registers /health + /daemon/connect + /daemon/disconnect, writes PID file,
-  blocks until signal/context/idle.
+  generates bearer token (rand.Text), registers /health + /daemon/attach +
+  /daemon/connect + /daemon/disconnect + /daemon/shutdown, writes PID file
+  (with token), blocks until signal/context/idle.
 - **EnsureRunning(ctx, Config) (int, error)** -- package-level convenience.
   Creates a Daemon internally, calls d.EnsureRunning(ctx), returns port.
 - **Proxy(ctx, cfg, ProxyOptions)** -- bridges stdin/stdout to daemon HTTP endpoint
-  with connection tracking. Checks `IsHeld` before dialing (returns `ErrNotRunning`
-  for dead daemons instead of connection refused).
+  with connection tracking. Tries lease-based attach first (GET /daemon/attach),
+  falls back to connect/disconnect for v0.3.0 daemons. Reads bearer token from
+  PID file. Checks `IsHeld` before dialing (returns `ErrNotRunning` for dead
+  daemons instead of connection refused).
 
 ### Daemon Methods
 

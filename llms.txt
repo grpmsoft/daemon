@@ -18,7 +18,7 @@ Three modes: Client mode (Start/Stop/Restart/EnsureRunning/Status — manage a b
 ### Core Types
 
 - `Daemon` — lifecycle manager. Created via New(Config) or NewWithDeps(Config, PIDStore, ProcessManager, HealthChecker) for testing.
-- `Config` — Name (string), DataDir (string), Binary (string, default os.Executable()), Args ([]string), Timeout (time.Duration, default 30s), HealthPath (string, default "/health"), IdleTimeout (time.Duration, 0=disabled).
+- `Config` — Name (string), DataDir (string), Binary (string, default os.Executable()), Args ([]string), Timeout (time.Duration, default 30s), HealthPath (string, default "/health"), IdleTimeout (time.Duration, 0=disabled), RequireToken (bool, default false — when true, bearer token required for app handler).
 - `Status` — enum: StatusStopped, StatusStarting, StatusRunning, StatusStopping, StatusError.
 - `Info` — status snapshot: Status, PID, Port, Name, StartTime, Uptime.
 - `Group` — concurrent actor orchestration (oklog/run reimplemented, zero deps). Add(execute, interrupt) pairs; Run() starts all; first return triggers interrupt on all others.
@@ -34,9 +34,9 @@ Three modes: Client mode (Start/Stop/Restart/EnsureRunning/Status — manage a b
 
 - `New(Config) *Daemon` — create with default implementations.
 - `NewWithDeps(Config, PIDStore, ProcessManager, HealthChecker) *Daemon` — create with mocks for testing.
-- `Serve(ctx, Config, http.Handler) error` — run as daemon: picks free port, writes PID file, registers /health + /daemon/connect + /daemon/disconnect, blocks until signal/context/idle.
+- `Serve(ctx, Config, http.Handler) error` — run as daemon: picks free port, generates bearer token (rand.Text), writes PID file (with token), registers /health + /daemon/attach + /daemon/connect + /daemon/disconnect + /daemon/shutdown, blocks until signal/context/idle. All /daemon/* endpoints require bearer token.
 - `EnsureRunning(ctx, Config) (port int, err error)` — package-level convenience. Creates Daemon internally, returns port. Race-safe PID locking.
-- `Proxy(ctx, cfg Config, opts ProxyOptions) error` — bridge io.Reader/Writer to daemon HTTP endpoint. Checks IsHeld before dialing (returns ErrNotRunning for dead daemons). Testable, no hardcoded timeout.
+- `Proxy(ctx, cfg Config, opts ProxyOptions) error` — bridge io.Reader/Writer to daemon HTTP endpoint. Tries lease-based attach first (GET /daemon/attach), falls back to connect/disconnect for v0.3.0 daemons. Reads bearer token from PID file. Checks IsHeld before dialing (returns ErrNotRunning for dead daemons).
 
 ### Daemon Methods
 
