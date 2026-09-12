@@ -17,6 +17,7 @@ package daemon
 
 import (
 	"context"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"net"
@@ -26,6 +27,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -317,8 +319,12 @@ func (ct *ConnTracker) Active() int64 {
 
 // Serve runs the daemon in the foreground. Called by the spawned process.
 // It picks a free port, registers /health + connection tracking endpoints,
-// writes PID file (with binary verification), and blocks until ctx is
+// writes PID data to the locked PID file, and blocks until ctx is
 // cancelled, SIGINT/SIGTERM is received, or idle timeout fires.
+//
+// Lock inheritance: if DAEMON_PIDFD=3 is set (spawned by Start/EnsureRunning),
+// Serve inherits the locked fd from the parent via ExtraFiles. If not set
+// (manual foreground start), Serve acquires the lock itself.
 //
 // Idle auto-shutdown: if Config.IdleTimeout > 0 and all connections disconnect,
 // Serve waits IdleTimeout before initiating graceful shutdown. A new connection
@@ -327,12 +333,35 @@ func Serve(ctx context.Context, cfg Config, handler http.Handler) error {
 	cfg.applyDefaults()
 
 	startTime := time.Now()
+	pidPath := filepath.Join(cfg.DataDir, cfg.Name+".pid")
+
+	// Acquire or inherit the PID file lock.
+	lock, lockErr := acquireServeLock(pidPath)
+	if lockErr != nil {
+		return lockErr
+	}
+	defer lock.Release()
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return fmt.Errorf("listen for free port: %w", err)
 	}
 	port := ln.Addr().(*net.TCPAddr).Port
+
+	// Write PID data through the lock (Seek+Truncate, preserves inode).
+	binaryPath, _ := os.Executable()
+	pidData := PIDInfo{
+		PID:       os.Getpid(),
+		Port:      port,
+		Name:      cfg.Name,
+		Binary:    binaryPath,
+		StartTime: startTime,
+	}
+	pidJSON, _ := json.Marshal(pidData)
+	if err := lock.WriteData(pidJSON); err != nil {
+		_ = ln.Close()
+		return fmt.Errorf("write pid data: %w", err)
+	}
 
 	ct := NewConnTracker()
 
@@ -355,18 +384,6 @@ func Serve(ctx context.Context, cfg Config, handler http.Handler) error {
 	server := &http.Server{
 		Handler:           loopbackGuard(mux, port),
 		ReadHeaderTimeout: 10 * time.Second,
-	}
-
-	// Resolve the daemon binary path for process verification.
-	binaryPath, _ := os.Executable()
-
-	pidStore := newDefaultPIDStore(cfg.DataDir, cfg.Name)
-	if err := pidStore.Save(os.Getpid(), port, cfg.Name, binaryPath, startTime); err != nil {
-		if closeErr := ln.Close(); closeErr != nil {
-			// Both errors reported; wrap the primary, log the secondary.
-			return fmt.Errorf("write pid file (listener close: %s): %w", closeErr.Error(), err)
-		}
-		return fmt.Errorf("write pid file: %w", err)
 	}
 
 	sigCtx, sigStop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
@@ -416,14 +433,10 @@ func Serve(ctx context.Context, cfg Config, handler http.Handler) error {
 
 	runErr := g.Run()
 
-	// Compare-and-delete: only clear PID file if it still points to OUR pid.
-	// An orphan daemon whose PID file was overwritten by a newer instance
-	// must not delete the newer instance's PID file on exit.
-	myPID := os.Getpid()
+	// Lock is released by deferred lock.Release() — kernel drops flock/share-mode.
+	// No explicit PID file cleanup needed: the lock IS the identity.
+	// The file stays on disk (intentional — flock+unlink race prevention).
 	var clearErr error
-	if data, loadErr := pidStore.Load(); loadErr == nil && data.PID == myPID {
-		clearErr = pidStore.Clear()
-	}
 
 	// context.Canceled from signal handler is a clean shutdown.
 	if errors.Is(runErr, context.Canceled) {
@@ -438,6 +451,29 @@ func Serve(ctx context.Context, cfg Config, handler http.Handler) error {
 	}
 
 	return nil
+}
+
+// acquireServeLock obtains the PID file lock for Serve.
+// If DAEMON_PIDFD env is set, inherits the fd from the parent process.
+// Otherwise (foreground start), acquires the lock directly.
+func acquireServeLock(pidPath string) (*pidlock.Lock, error) {
+	if fdStr := os.Getenv("DAEMON_PIDFD"); fdStr != "" {
+		fd, err := strconv.Atoi(fdStr)
+		if err != nil {
+			return nil, fmt.Errorf("invalid DAEMON_PIDFD=%q: %w", fdStr, err)
+		}
+		return pidlock.InheritFD(fd, pidPath)
+	}
+
+	// Foreground mode — acquire lock directly.
+	lock, err := pidlock.TryLock(pidPath)
+	if err != nil {
+		if errors.Is(err, pidlock.ErrLocked) {
+			return nil, fmt.Errorf("daemon already running (pid file locked): %w", err)
+		}
+		return nil, fmt.Errorf("acquire pid lock: %w", err)
+	}
+	return lock, nil
 }
 
 // waitForIdle blocks until connections drop to zero AND stay zero for the

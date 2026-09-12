@@ -94,6 +94,13 @@ func (l *Lock) Release() {
 // unless explicitly configured via PROC_THREAD_ATTRIBUTE_HANDLE_LIST.
 func (l *Lock) SetCloseOnExec() {}
 
+// InheritFD is not supported on Windows — ExtraFiles fd inheritance is not
+// available. Windows uses a different startup mechanism (see ADR-001).
+// This returns an error; callers should use TryLock on Windows.
+func InheritFD(_ int, _ string) (*Lock, error) {
+	return nil, fmt.Errorf("pidlock: fd inheritance not supported on Windows")
+}
+
 // ReadLocked reads the content of a PID file that may be held by another process.
 // Opens with FILE_SHARE_READ|FILE_SHARE_WRITE to allow reading alongside the
 // exclusive writer lock.

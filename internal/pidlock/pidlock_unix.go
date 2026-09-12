@@ -94,6 +94,25 @@ func (l *Lock) SetCloseOnExec() {
 	syscall.CloseOnExec(int(l.f.Fd()))
 }
 
+// InheritFD wraps an already-locked file descriptor inherited from a parent process
+// via ExtraFiles. Sets FD_CLOEXEC so children (e.g., gopls) don't inherit the lock.
+// Re-acquires flock(LOCK_NB) for NFS compatibility (fcntl-emulated flocks don't
+// survive fork on some NFS implementations).
+func InheritFD(fd int, name string) (*Lock, error) {
+	f := os.NewFile(uintptr(fd), name)
+	if f == nil {
+		return nil, fmt.Errorf("pidlock: invalid fd %d", fd)
+	}
+	syscall.CloseOnExec(fd)
+
+	// Re-acquire on the same OFD — no-op on local fs, real on NFS.
+	if err := flockNB(f); err != nil && !errors.Is(err, syscall.EWOULDBLOCK) {
+		return nil, fmt.Errorf("pidlock: re-flock inherited fd: %w", err)
+	}
+
+	return &Lock{f: f}, nil
+}
+
 // ReadLocked reads the content of a PID file that may be locked by another process.
 // flock is advisory — reading is always possible regardless of lock state.
 func ReadLocked(path string) ([]byte, error) {

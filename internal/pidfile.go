@@ -25,11 +25,11 @@ type pidData struct {
 
 // PIDInfo mirrors daemon.PIDInfo for the PIDStore interface contract.
 type PIDInfo struct {
-	PID       int
-	Port      int
-	Name      string
-	Binary    string
-	StartTime time.Time
+	PID       int       `json:"pid"`
+	Port      int       `json:"port"`
+	Name      string    `json:"name"`
+	Binary    string    `json:"binary"`
+	StartTime time.Time `json:"startTime"`
 }
 
 // PIDFile manages reading and writing a JSON PID file on disk.
@@ -103,7 +103,7 @@ func (p *PIDFile) Load() (PIDInfo, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	raw, err := os.ReadFile(p.path)
+	raw, err := pidlock.ReadLocked(p.path)
 	if err != nil {
 		return PIDInfo{}, fmt.Errorf("read pid file %s: %w", p.path, err)
 	}

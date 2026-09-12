@@ -91,11 +91,11 @@ type PIDStore interface {
 
 // PIDInfo holds the persisted state of a running daemon, as returned by PIDStore.Load().
 type PIDInfo struct {
-	PID       int
-	Port      int
-	Name      string
-	Binary    string
-	StartTime time.Time
+	PID       int       `json:"pid"`
+	Port      int       `json:"port"`
+	Name      string    `json:"name"`
+	Binary    string    `json:"binary"`
+	StartTime time.Time `json:"startTime"`
 }
 
 // ProcessManager abstracts platform-specific process lifecycle operations.
