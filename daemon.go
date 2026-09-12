@@ -39,11 +39,10 @@ import (
 // It depends on PIDStore, ProcessManager, and HealthChecker interfaces —
 // not on concrete implementations. New() wires the defaults.
 type Daemon struct {
-	cfg     Config
-	handler http.Handler
-	pids    PIDStore
-	procs   ProcessManager
-	health  HealthChecker
+	cfg    Config
+	pids   PIDStore
+	procs  ProcessManager
+	health HealthChecker
 }
 
 // New creates a Daemon with the given configuration and default implementations.
@@ -69,11 +68,6 @@ func NewWithDeps(cfg Config, pids PIDStore, procs ProcessManager, health HealthC
 		procs:  procs,
 		health: health,
 	}
-}
-
-// SetHandler sets the HTTP handler that Serve() will expose.
-func (d *Daemon) SetHandler(h http.Handler) {
-	d.handler = h
 }
 
 // Start spawns a detached background process running the given binary with args.
@@ -301,15 +295,20 @@ func (ct *ConnTracker) Connect() {
 // The count is clamped to zero — an unmatched Disconnect (stray request,
 // crashed client) cannot drive it negative and cause premature shutdown.
 func (ct *ConnTracker) Disconnect() {
-	n := ct.count.Add(-1)
-	if n < 0 {
-		ct.count.Store(0)
-		n = 0
-	}
-	if n == 0 {
-		select {
-		case ct.idleCh <- struct{}{}:
-		default:
+	for {
+		old := ct.count.Load()
+		next := old - 1
+		if next < 0 {
+			next = 0
+		}
+		if ct.count.CompareAndSwap(old, next) {
+			if next == 0 {
+				select {
+				case ct.idleCh <- struct{}{}:
+				default:
+				}
+			}
+			return
 		}
 	}
 }
