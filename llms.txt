@@ -13,6 +13,8 @@ daemon manages background daemon processes with HTTP health checks, PID file loc
 
 Three modes: Client mode (Start/Stop/Restart/EnsureRunning/Status — manage a background daemon), Server mode (Serve — run as the foreground daemon with HTTP, PID, signals), and Proxy mode (Proxy — bridge stdin/stdout to daemon HTTP for MCP/JSON-RPC).
 
+Not a system service manager. For systemd/launchd/SCM use kardianos/service. This library manages on-demand background processes owned by CLI callers: starts when needed, shared between clients, shuts down when idle.
+
 ## API
 
 ### Core Types
