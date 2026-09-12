@@ -35,7 +35,7 @@ go tool cover -html=coverage.out
 - Pass `go vet ./...`
 - Add comments for non-obvious logic -- explain WHY, not WHAT
 - All public types and functions must have doc comments
-- No `unsafe` -- this library is intentionally pure safe Go
+- No `unsafe` except where required for Win32 API calls (`internal/process_windows.go`)
 - No external dependencies -- stdlib only
 
 ## Pull Requests

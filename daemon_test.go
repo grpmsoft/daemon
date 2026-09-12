@@ -344,7 +344,7 @@ func TestDaemon_Stop_DeadProcess_ClearsPIDWithoutKill(t *testing.T) {
 
 func TestDaemon_Stop_AliveProcess_KillsAndClears(t *testing.T) {
 	const pid = 12345
-	pids := &pidStoreMock{saved: &PIDInfo{PID: pid, Port: 8080}}
+	pids := &pidStoreMock{saved: &PIDInfo{PID: pid, Port: 8080}, aliveResult: true}
 	procs := &mockProcessManager{aliveResult: true}
 	d := newMockDaemon(pids, procs, &mockHealthChecker{})
 
@@ -362,7 +362,7 @@ func TestDaemon_Stop_AliveProcess_KillsAndClears(t *testing.T) {
 }
 
 func TestDaemon_Stop_KillFails_ReturnsError(t *testing.T) {
-	pids := &pidStoreMock{saved: &PIDInfo{PID: 555, Port: 7070}}
+	pids := &pidStoreMock{saved: &PIDInfo{PID: 555, Port: 7070}, aliveResult: true}
 	procs := &mockProcessManager{
 		aliveResult: true,
 		killErr:     errors.New("permission denied"),

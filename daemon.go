@@ -24,6 +24,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -75,6 +76,10 @@ func (d *Daemon) Start(ctx context.Context, binary string, args []string) error 
 	if d.IsRunning() {
 		info, _ := d.Status()
 		return fmt.Errorf("daemon %s already running (pid %d, port %d)", d.cfg.Name, info.PID, info.Port)
+	}
+
+	if err := os.MkdirAll(d.cfg.DataDir, 0o750); err != nil {
+		return fmt.Errorf("create data dir %s: %w", d.cfg.DataDir, err)
 	}
 
 	if err := d.pids.Clear(); err != nil {
@@ -130,14 +135,18 @@ func (d *Daemon) waitForPIDFile(ctx context.Context, expectedPID int) error {
 	}
 }
 
-// Stop reads the PID file, kills the daemon process, and clears the PID file.
+// Stop reads the PID file, verifies the process identity (PID + binary path),
+// kills the daemon process, and clears the PID file. If the PID has been
+// recycled to a different process, the stale PID file is cleared without killing.
 func (d *Daemon) Stop() error {
 	data, err := d.pids.Load()
 	if err != nil {
 		return fmt.Errorf("stop daemon %s: %w", d.cfg.Name, err)
 	}
 
-	if !d.procs.IsProcessAlive(data.PID) {
+	// Use IsAlive (PID + binary verification) instead of bare IsProcessAlive
+	// to avoid killing an unrelated process with a recycled PID.
+	if !d.pids.IsAlive() {
 		return d.pids.Clear()
 	}
 
@@ -227,10 +236,15 @@ func (ct *ConnTracker) Connect() {
 
 // Disconnect decrements the connection count. If it drops to zero,
 // signals on idleCh so the idle timer can start.
+// The count is clamped to zero — an unmatched Disconnect (stray request,
+// crashed client) cannot drive it negative and cause premature shutdown.
 func (ct *ConnTracker) Disconnect() {
 	n := ct.count.Add(-1)
-	if n <= 0 {
-		// Non-blocking signal: connections dropped to zero.
+	if n < 0 {
+		ct.count.Store(0)
+		n = 0
+	}
+	if n == 0 {
 		select {
 		case ct.idleCh <- struct{}{}:
 		default:
@@ -281,7 +295,7 @@ func Serve(ctx context.Context, cfg Config, handler http.Handler) error {
 	}
 
 	server := &http.Server{
-		Handler:           mux,
+		Handler:           loopbackGuard(mux, port),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
@@ -366,6 +380,15 @@ func Serve(ctx context.Context, cfg Config, handler http.Handler) error {
 // idle timeout expires without new connections. Returns ctx.Err() if the
 // context is cancelled (another actor shut down first).
 func waitForIdle(ctx context.Context, ct *ConnTracker, timeout time.Duration) error {
+	// If already idle at startup (no connections yet), arm the timer immediately
+	// instead of waiting for a Disconnect that will never come.
+	if ct.Active() <= 0 {
+		select {
+		case ct.idleCh <- struct{}{}:
+		default:
+		}
+	}
+
 	for {
 		// Wait for connections to drop to zero.
 		select {
@@ -401,4 +424,32 @@ func waitForIdle(ctx context.Context, ct *ConnTracker, timeout time.Duration) er
 			continue
 		}
 	}
+}
+
+// loopbackGuard rejects HTTP requests whose Host header does not resolve to
+// a loopback address. This prevents DNS rebinding attacks where a browser
+// page tricks the user's machine into sending requests to the local daemon.
+// Required by MCP Streamable HTTP transport specification for localhost servers.
+func loopbackGuard(next http.Handler, port int) http.Handler {
+	allowed := map[string]bool{
+		fmt.Sprintf("127.0.0.1:%d", port): true,
+		fmt.Sprintf("localhost:%d", port):  true,
+		"127.0.0.1":                        true,
+		"localhost":                         true,
+	}
+
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !allowed[r.Host] {
+			http.Error(w, "forbidden: non-loopback host", http.StatusForbidden)
+			return
+		}
+		if origin := r.Header.Get("Origin"); origin != "" {
+			if !strings.Contains(origin, "://127.0.0.1") &&
+				!strings.Contains(origin, "://localhost") {
+				http.Error(w, "forbidden: non-loopback origin", http.StatusForbidden)
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
 }

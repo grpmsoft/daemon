@@ -51,7 +51,7 @@ internal/
   process.go     -- Cross-platform process utilities (IsProcessAlive, KillProcess)
   process_unix.go    -- Unix: StartDetached via os.StartProcess with Setsid
   process_windows.go -- Windows: StartDetached via CREATE_NEW_PROCESS_GROUP + DETACHED_PROCESS
-  health.go      -- HTTP health check polling with exponential backoff
+  health.go      -- HTTP health check polling (fixed 500ms interval)
 ```
 
 ### Key Types
@@ -87,7 +87,7 @@ internal/
   CREATE_NEW_PROCESS_GROUP).
 
 - **HealthChecker** -- Check, WaitUntilReady. Abstracts HTTP health polling
-  with configurable timeout and backoff.
+  with configurable timeout (polls every 500ms).
 
 ### Key Functions
 
