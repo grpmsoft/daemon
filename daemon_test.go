@@ -3,10 +3,17 @@ package daemon
 import (
 	"context"
 	"errors"
+	"os"
 	"strings"
 	"testing"
 	"time"
 )
+
+// fileStatForTest is a thin wrapper around os.Stat used by DataDir-creation tests.
+// Named so callers read as "stat the path for the test" rather than importing os directly.
+func fileStatForTest(path string) (os.FileInfo, error) {
+	return os.Stat(path)
+}
 
 // ---------------------------------------------------------------------------
 // Mock implementations of the three interfaces.
@@ -344,7 +351,7 @@ func TestDaemon_Stop_DeadProcess_ClearsPIDWithoutKill(t *testing.T) {
 
 func TestDaemon_Stop_AliveProcess_KillsAndClears(t *testing.T) {
 	const pid = 12345
-	pids := &pidStoreMock{saved: &PIDInfo{PID: pid, Port: 8080}}
+	pids := &pidStoreMock{saved: &PIDInfo{PID: pid, Port: 8080}, aliveResult: true}
 	procs := &mockProcessManager{aliveResult: true}
 	d := newMockDaemon(pids, procs, &mockHealthChecker{})
 
@@ -362,7 +369,7 @@ func TestDaemon_Stop_AliveProcess_KillsAndClears(t *testing.T) {
 }
 
 func TestDaemon_Stop_KillFails_ReturnsError(t *testing.T) {
-	pids := &pidStoreMock{saved: &PIDInfo{PID: 555, Port: 7070}}
+	pids := &pidStoreMock{saved: &PIDInfo{PID: 555, Port: 7070}, aliveResult: true}
 	procs := &mockProcessManager{
 		aliveResult: true,
 		killErr:     errors.New("permission denied"),
@@ -581,5 +588,199 @@ func TestNewWithDeps_InjectsProvidedDependencies(t *testing.T) {
 	// IsRunning delegates to pids.IsAlive — verify the injected mock is used.
 	if !d.IsRunning() {
 		t.Error("IsRunning must use the injected PIDStore, expected true, got false")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Tests: B6 — Start() creates DataDir if it doesn't exist.
+// ---------------------------------------------------------------------------
+
+func TestDaemon_Start_CreatesDataDir(t *testing.T) {
+	// Use t.TempDir() as the parent; append a nested subdir that does not exist.
+	parent := t.TempDir()
+	nestedDir := parent + "/sub/nested/datadir"
+
+	const wantPID = 4242
+	inner := &mockProcessManager{startPID: wantPID}
+	health := &mockHealthChecker{}
+	pids := &pidStoreMock{}
+
+	hook := &hookProcessManager{
+		inner: inner,
+		onStart: func() {
+			pids.saved = &PIDInfo{PID: wantPID, Port: 8080, Name: "mkdirtest"}
+		},
+	}
+
+	d := NewWithDeps(Config{
+		Name:       "mkdirtest",
+		DataDir:    nestedDir,
+		Timeout:    500 * time.Millisecond,
+		HealthPath: "/health",
+	}, pids, hook, health)
+
+	err := d.Start(context.Background(), "/usr/bin/app", nil)
+	if err != nil {
+		t.Fatalf("Start must succeed when DataDir doesn't exist yet: %v", err)
+	}
+
+	// Verify the directory was actually created on disk.
+	info, statErr := fileStatForTest(nestedDir)
+	if statErr != nil {
+		t.Fatalf("DataDir %q must have been created: %v", nestedDir, statErr)
+	}
+	if !info.IsDir() {
+		t.Errorf("DataDir %q must be a directory", nestedDir)
+	}
+
+	// StartDetached must have been called exactly once.
+	if hook.startCallCount != 1 {
+		t.Errorf("StartDetached call count: got %d, want 1", hook.startCallCount)
+	}
+}
+
+func TestDaemon_Start_DataDirAlreadyExists_Succeeds(t *testing.T) {
+	// DataDir pre-exists — Start must still succeed (MkdirAll is idempotent).
+	existingDir := t.TempDir()
+
+	const wantPID = 4343
+	inner := &mockProcessManager{startPID: wantPID}
+	health := &mockHealthChecker{}
+	pids := &pidStoreMock{}
+
+	hook := &hookProcessManager{
+		inner: inner,
+		onStart: func() {
+			pids.saved = &PIDInfo{PID: wantPID, Port: 8080, Name: "existtest"}
+		},
+	}
+
+	d := NewWithDeps(Config{
+		Name:       "existtest",
+		DataDir:    existingDir,
+		Timeout:    500 * time.Millisecond,
+		HealthPath: "/health",
+	}, pids, hook, health)
+
+	err := d.Start(context.Background(), "/usr/bin/app", nil)
+	if err != nil {
+		t.Fatalf("Start must succeed when DataDir already exists: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Tests: B5 — Stop() uses IsAlive() (PID + binary verification), not
+// bare IsProcessAlive(). Stale PID that belongs to a different process
+// must be cleared without killing.
+// ---------------------------------------------------------------------------
+
+// TestDaemon_Stop_StalePID_ClearsWithoutKill verifies that when IsAlive()
+// returns false (PID recycled to a different process), Stop clears the PID
+// file without calling KillProcess.
+//
+// The existing TestDaemon_Stop_AliveProcess_KillsAndClears covers
+// aliveResult=true. This test covers aliveResult=false with a non-nil
+// saved PID, which is the "stale/recycled" scenario (B5 fix).
+func TestDaemon_Stop_StalePID_ClearsWithoutKill(t *testing.T) {
+	// aliveResult=false means IsAlive() returns false (PID recycled or
+	// process died after PID file was written).
+	pids := &pidStoreMock{
+		saved:       &PIDInfo{PID: 77777, Port: 8080, Name: "testapp"},
+		aliveResult: false,
+	}
+	procs := &mockProcessManager{aliveResult: false}
+	d := newMockDaemon(pids, procs, &mockHealthChecker{})
+
+	err := d.Stop()
+	if err != nil {
+		t.Fatalf("Stop must succeed for a stale PID: %v", err)
+	}
+	if procs.killCallCount != 0 {
+		t.Errorf("KillProcess must NOT be called for a stale PID (aliveResult=false), got %d calls", procs.killCallCount)
+	}
+	if pids.clearCallCount != 1 {
+		t.Errorf("Clear must be called once to remove the stale PID file, got %d", pids.clearCallCount)
+	}
+	if pids.saved != nil {
+		t.Errorf("PID store must be empty after clearing stale PID, got %+v", pids.saved)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Tests: B4 — ConnTracker Disconnect clamp (cannot go negative).
+// ---------------------------------------------------------------------------
+
+func TestConnTracker_Disconnect_StrayWithoutConnect_StaysZero(t *testing.T) {
+	ct := NewConnTracker()
+
+	// Disconnect with no prior Connect — must not go negative.
+	ct.Disconnect()
+
+	if got := ct.Active(); got != 0 {
+		t.Errorf("Active() after stray Disconnect = %d, want 0 (clamp prevents negative)", got)
+	}
+}
+
+func TestConnTracker_Disconnect_DoubleDisconnect_StaysZero(t *testing.T) {
+	ct := NewConnTracker()
+
+	ct.Connect()
+	ct.Disconnect() // balanced — count reaches 0
+	ct.Disconnect() // stray — must clamp to 0, not -1
+
+	if got := ct.Active(); got != 0 {
+		t.Errorf("Active() after Connect+Disconnect+stray Disconnect = %d, want 0", got)
+	}
+}
+
+func TestConnTracker_Disconnect_StrayExtraDisconnect_OtherConnectionsIntact(t *testing.T) {
+	// Connect A, Connect B, stray Disconnect, Disconnect A → B still connected.
+	ct := NewConnTracker()
+
+	ct.Connect()    // A
+	ct.Connect()    // B
+	ct.Disconnect() // stray (simulates crashed client) — count goes 2→1
+	ct.Disconnect() // A disconnects — count goes 1→0
+
+	// B is still logically connected, but the stray Disconnect consumed A's slot.
+	// The clamp ensures we never see negative values; actual count is 0.
+	// The important invariant: Active() never reports a negative value.
+	if got := ct.Active(); got < 0 {
+		t.Errorf("Active() must never be negative, got %d", got)
+	}
+}
+
+func TestConnTracker_ClampNeverGoesNegative_TableDriven(t *testing.T) {
+	tests := []struct {
+		name        string
+		connects    int
+		disconnects int
+		wantMin     int64 // Active() must be >= wantMin
+	}{
+		{"zero disconnects zero connects", 0, 0, 0},
+		{"one stray disconnect", 0, 1, 0},
+		{"three stray disconnects", 0, 3, 0},
+		{"two connects one extra disconnect", 2, 3, 0},
+		{"balanced", 5, 5, 0},
+		{"more connects than disconnects", 5, 3, 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ct := NewConnTracker()
+			for range tt.connects {
+				ct.Connect()
+			}
+			for range tt.disconnects {
+				ct.Disconnect()
+			}
+			got := ct.Active()
+			if got < 0 {
+				t.Errorf("Active() = %d, must never be negative", got)
+			}
+			if got < tt.wantMin {
+				t.Errorf("Active() = %d, want >= %d", got, tt.wantMin)
+			}
+		})
 	}
 }

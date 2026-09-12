@@ -28,7 +28,7 @@ Two modes: Client mode (Start/Stop/Restart/Status — manage a background daemon
 
 - `PIDStore` — Save, Load, Clear, IsAlive, Path. Abstracts PID file persistence.
 - `ProcessManager` — StartDetached, KillProcess, IsProcessAlive. Platform-specific process management.
-- `HealthChecker` — Check, WaitUntilReady. HTTP health polling with backoff.
+- `HealthChecker` — Check, WaitUntilReady. HTTP health polling (fixed 500ms interval).
 
 ### Functions
 
@@ -86,7 +86,7 @@ internal/
   process.go     — Cross-platform process utilities (IsProcessAlive, KillProcess)
   process_unix.go    — Unix: StartDetached via os.StartProcess with Setsid
   process_windows.go — Windows: StartDetached via CREATE_NEW_PROCESS_GROUP
-  health.go      — HTTP health check polling with exponential backoff
+  health.go      — HTTP health check polling (fixed 500ms interval)
 ```
 
 ## Optional

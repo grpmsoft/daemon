@@ -18,7 +18,8 @@ We commit to:
 ## Scope
 
 daemon is a pure-Go cross-platform daemon lifecycle library with no external
-dependencies, no unsafe code, and no CGO. Security concerns include:
+dependencies and no CGO. The only use of `unsafe` is in `internal/process_windows.go`
+for the Win32 `QueryFullProcessImageNameW` API call. Security concerns include:
 
 - **PID file race conditions** -- concurrent daemon startup could lead to stale
   PID files or duplicate instances

@@ -449,3 +449,38 @@ func TestPIDFile_IsAlive_NoBinary_SkipsVerification(t *testing.T) {
 		t.Error("IsAlive must return true for current PID when binary is empty (no verification)")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Tests: binaryPathsEqual (V2 regression)
+// ---------------------------------------------------------------------------
+
+func TestBinaryPathsEqual(t *testing.T) {
+	tests := []struct {
+		name     string
+		actual   string
+		expected string
+		want     bool
+	}{
+		{"identical", "/usr/bin/app", "/usr/bin/app", true},
+		{"deleted suffix on actual", "/usr/bin/app (deleted)", "/usr/bin/app", true},
+		{"deleted suffix on expected", "/usr/bin/app", "/usr/bin/app (deleted)", true},
+		{"deleted suffix on both", "/usr/bin/app (deleted)", "/usr/bin/app (deleted)", true},
+		{"different binaries", "/usr/bin/app", "/usr/bin/other", false},
+		{"different with deleted", "/usr/bin/app (deleted)", "/usr/bin/other", false},
+		{"trailing slash cleaned", "/usr/bin/app/", "/usr/bin/app", true},
+		{"double slash cleaned", "/usr/bin//app", "/usr/bin/app", true},
+		{"empty both", "", "", true},
+		{"one empty", "/usr/bin/app", "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := binaryPathsEqual(tt.actual, tt.expected)
+			if got != tt.want {
+				t.Errorf("binaryPathsEqual(%q, %q) = %v, want %v", tt.actual, tt.expected, got, tt.want)
+			}
+		})
+	}
+}
+
+// Compare-and-delete tests moved to serve_test.go (TestServe_CompareAndDelete_*)
+// where they test the actual Serve() behavior, not just PIDFile methods.

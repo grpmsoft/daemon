@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -155,12 +156,34 @@ func (p *PIDFile) IsAlive() bool {
 			// Fall back to PID-only check.
 			return true
 		}
-		if actual != data.Binary {
+		if !binaryPathsEqual(actual, data.Binary) {
 			return false
 		}
 	}
 
 	return true
+}
+
+// binaryPathsEqual compares two binary paths with platform-aware normalization.
+// On Linux, /proc/<pid>/exe appends " (deleted)" after binary replacement (go install).
+// On Windows, paths may differ in case or 8.3 form.
+func binaryPathsEqual(actual, expected string) bool {
+	actual = strings.TrimSuffix(actual, " (deleted)")
+	expected = strings.TrimSuffix(expected, " (deleted)")
+
+	// Resolve symlinks for both paths.
+	if resolved, err := filepath.EvalSymlinks(actual); err == nil {
+		actual = resolved
+	}
+	if resolved, err := filepath.EvalSymlinks(expected); err == nil {
+		expected = resolved
+	}
+
+	// Case-insensitive on Windows, case-sensitive elsewhere.
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(filepath.Clean(actual), filepath.Clean(expected))
+	}
+	return filepath.Clean(actual) == filepath.Clean(expected)
 }
 
 // Path returns the filesystem path of the PID file.

@@ -40,9 +40,6 @@ __debug_bin*
 
 # AI settings
 .claude/
-.goda/
-.goco/
-.gode/
 
 # Private dev docs
 docs/dev/

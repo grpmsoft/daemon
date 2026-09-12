@@ -220,3 +220,63 @@ func TestServe_AppliesDefaultsToConfig(t *testing.T) {
 	cancel()
 	<-serveErrCh
 }
+
+// ---------------------------------------------------------------------------
+// Tests: Compare-and-delete (V2c regression)
+// ---------------------------------------------------------------------------
+
+// waitOwnPIDFile polls until Serve writes its PID file with our PID.
+func waitOwnPIDFile(t *testing.T, store PIDStore) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if data, err := store.Load(); err == nil && data.PID == os.Getpid() {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("Serve did not write its PID file")
+}
+
+// V2c regression: Serve() must not remove a PID file a newer instance has overwritten.
+func TestServe_CompareAndDelete_KeepsForeignPIDFile(t *testing.T) {
+	dir := t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() { errCh <- Serve(ctx, Config{Name: "cad", DataDir: dir}, nil) }()
+	store := newDefaultPIDStore(dir, "cad")
+	waitOwnPIDFile(t, store)
+
+	// A newer instance overwrites the PID file; we are now the orphan.
+	if err := store.Save(os.Getpid()+1, 65000, "cad", "/other/binary", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+	if err := <-errCh; err != nil {
+		t.Fatalf("Serve: %v", err)
+	}
+	data, err := store.Load()
+	if err != nil {
+		t.Fatalf("V2c regression: orphan deleted the live daemon's PID file: %v", err)
+	}
+	if data.PID != os.Getpid()+1 {
+		t.Fatalf("PID file changed: got %d, want %d", data.PID, os.Getpid()+1)
+	}
+}
+
+// Positive case: Serve() does remove its own PID file.
+func TestServe_CompareAndDelete_RemovesOwnPIDFile(t *testing.T) {
+	dir := t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() { errCh <- Serve(ctx, Config{Name: "cad2", DataDir: dir}, nil) }()
+	store := newDefaultPIDStore(dir, "cad2")
+	waitOwnPIDFile(t, store)
+	cancel()
+	if err := <-errCh; err != nil {
+		t.Fatalf("Serve: %v", err)
+	}
+	if _, err := os.Stat(store.Path()); !os.IsNotExist(err) {
+		t.Fatalf("own PID file must be removed on shutdown, stat err=%v", err)
+	}
+}
