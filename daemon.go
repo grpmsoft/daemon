@@ -33,6 +33,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/grpmsoft/daemon/internal"
 	"github.com/grpmsoft/daemon/internal/pidlock"
 )
 
@@ -72,56 +73,56 @@ func NewWithDeps(cfg Config, pids PIDStore, procs ProcessManager, health HealthC
 }
 
 // Start spawns a detached background process running the given binary with args.
-// It waits for the health check to pass within Config.Timeout.
+// It uses the full lock protocol (same as EnsureRunning) to prevent races:
+//   - Acquire startup lock (serializes concurrent Start/EnsureRunning calls)
+//   - Under startup lock, check if daemon already running (PID file held)
+//   - Acquire PID file lock, pass fd to child via ExtraFiles
+//   - Wait for health check to pass within Config.Timeout
+//
 // The spawned process must eventually call Serve().
 func (d *Daemon) Start(ctx context.Context, binary string, args []string) error {
-	if d.IsRunning() {
-		info, _ := d.Status()
-		return fmt.Errorf("%w (pid %d, port %d)", ErrAlreadyRunning, info.PID, info.Port)
-	}
-
 	if err := os.MkdirAll(d.cfg.DataDir, 0o750); err != nil {
-		return fmt.Errorf("create data dir %s: %w", d.cfg.DataDir, err)
+		return fmt.Errorf("start %s: create data dir: %w", d.cfg.Name, err)
 	}
 
-	// Note: PID file is NOT cleared/deleted — it may be locked by the new
-	// inherited-lock mechanism. Stale data is handled by the lock protocol.
-
-	logFile := filepath.Join(d.cfg.DataDir, d.cfg.Name+".log")
-	env := []string{
-		"DAEMON_MODE=1",
-		fmt.Sprintf("DAEMON_DATA_DIR=%s", d.cfg.DataDir),
-	}
-
-	pid, err := d.procs.StartDetached(binary, args, logFile, env)
+	// Step 1: Acquire startup lock (serializes concurrent Start/EnsureRunning).
+	lockPath := filepath.Join(d.cfg.DataDir, d.cfg.Name+".lock")
+	startupFile, err := internal.LockCtx(ctx, lockPath)
 	if err != nil {
-		return fmt.Errorf("start daemon %s: %w", d.cfg.Name, err)
+		return fmt.Errorf("start %s: startup lock: %w", d.cfg.Name, err)
+	}
+	defer internal.Unlock(startupFile)
+
+	pidPath := filepath.Join(d.cfg.DataDir, d.cfg.Name+".pid")
+
+	// Step 2: Under startup lock, check if daemon already running.
+	if pidlock.IsHeld(pidPath) {
+		data, _ := d.pids.Load()
+		return fmt.Errorf("%w (pid %d, port %d)", ErrAlreadyRunning, data.PID, data.Port)
 	}
 
-	if err := d.waitForPIDFile(ctx, pid); err != nil {
-		_ = d.procs.KillProcess(ctx, pid, 5*time.Second)
-		tail := readLogTail(logFile, 20)
-		if tail != "" {
-			return fmt.Errorf("daemon %s (pid %d) did not become ready, killed: %w\nlog tail:\n%s", d.cfg.Name, pid, err, tail)
+	// Step 3: Acquire PID file lock.
+	lock, tryErr := pidlock.TryLock(pidPath)
+	if tryErr != nil {
+		if errors.Is(tryErr, pidlock.ErrLocked) {
+			return fmt.Errorf("%w: pid file locked", ErrAlreadyRunning)
 		}
-		return fmt.Errorf("daemon %s (pid %d) did not become ready, killed: %w", d.cfg.Name, pid, err)
+		return fmt.Errorf("start %s: pid lock: %w", d.cfg.Name, tryErr)
 	}
 
-	data, loadErr := d.pids.Load()
-	if loadErr != nil {
-		_ = d.procs.KillProcess(ctx, pid, 5*time.Second)
-		return fmt.Errorf("daemon %s (pid %d) started but pid file unreadable, killed: %w", d.cfg.Name, pid, loadErr)
+	// Truncate stale data so concurrent readers never see old port.
+	_ = lock.WriteData([]byte{})
+
+	// Step 4: Start with lock (passes fd to child via ExtraFiles).
+	_, startErr := d.startWithLock(ctx, binary, args, lock)
+	if startErr != nil {
+		_ = lock.File().Close()
+		return fmt.Errorf("start %s: %w", d.cfg.Name, startErr)
 	}
 
-	if err := d.health.WaitUntilReady(data.Port, d.cfg.HealthPath, d.cfg.Timeout); err != nil {
-		_ = d.procs.KillProcess(ctx, pid, 5*time.Second)
-		tail := readLogTail(logFile, 20)
-		if tail != "" {
-			return fmt.Errorf("daemon %s (pid %d) health check failed, killed: %w\nlog tail:\n%s", d.cfg.Name, pid, err, tail)
-		}
-		return fmt.Errorf("daemon %s (pid %d) health check failed, killed: %w", d.cfg.Name, pid, err)
-	}
-
+	// Parent closes fd -- child holds lock via inherited fd (Unix)
+	// or via own TryLock (Windows, after setupExtraFiles released parent's).
+	_ = lock.File().Close()
 	return nil
 }
 
