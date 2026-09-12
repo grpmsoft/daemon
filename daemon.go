@@ -541,19 +541,23 @@ func Serve(ctx context.Context, cfg Config, handler http.Handler) error {
 		Handler:           loopbackGuard(authGuard(mux, token, cfg.RequireToken, cfg.HealthPath), port),
 		ReadHeaderTimeout: 10 * time.Second,
 		// BaseContext derives each request's context from serveCtx.
-		// When server.Shutdown is called, in-flight request contexts are cancelled,
-		// which unblocks long-lived handlers like /daemon/attach.
+		// serveCancel is called in the HTTP server's interrupt before Shutdown,
+		// which cancels all in-flight request contexts (unblocking /daemon/attach).
 		BaseContext: func(_ net.Listener) context.Context { return serveCtx },
 	}
 
-	return runServeGroup(ctx, server, ln, shutdownCh, ct, cfg.IdleTimeout)
+	return runServeGroup(server, ln, shutdownCh, ct, cfg.IdleTimeout, serveCancel)
 }
 
 // runServeGroup sets up the actor group (HTTP server, signal handler, shutdown
 // endpoint, idle timer) and runs them. Extracted from Serve to keep both
 // functions within the funlen limit.
-func runServeGroup(ctx context.Context, server *http.Server, ln net.Listener, shutdownCh chan struct{}, ct *ConnTracker, idleTimeout time.Duration) error {
-	sigCtx, sigStop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
+//
+// cancelBase is called before server.Shutdown to cancel the BaseContext,
+// unblocking long-lived handlers like /daemon/attach.
+func runServeGroup(server *http.Server, ln net.Listener, shutdownCh chan struct{}, ct *ConnTracker, idleTimeout time.Duration, cancelBase context.CancelFunc) error {
+	// Use the server's BaseContext (serveCtx) for signal notifications.
+	sigCtx, sigStop := signal.NotifyContext(server.BaseContext(ln), syscall.SIGINT, syscall.SIGTERM)
 
 	var g Group
 
@@ -566,6 +570,9 @@ func runServeGroup(ctx context.Context, server *http.Server, ln net.Listener, sh
 			return nil
 		},
 		func(error) {
+			// Cancel the base context first — this cancels all in-flight request
+			// contexts, unblocking long-lived handlers like /daemon/attach.
+			cancelBase()
 			shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer shutdownCancel()
 			if shutErr := server.Shutdown(shutdownCtx); shutErr != nil {

@@ -73,7 +73,8 @@ func Proxy(ctx context.Context, cfg Config, opts ProxyOptions) error {
 	daemonBase := fmt.Sprintf("http://127.0.0.1:%d", info.Port)
 	token := info.Token
 
-	plog := proxyLogger(cfg)
+	plog, plogClose := proxyLogger(cfg)
+	defer plogClose()
 
 	// No hardcoded Timeout — use ctx for deadline control.
 	client := &http.Client{}
@@ -171,13 +172,15 @@ func readPIDInfo(pidPath string) (PIDInfo, error) {
 	return info, nil
 }
 
-func proxyLogger(cfg Config) *log.Logger {
+// proxyLogger creates a logger that writes to proxy.log in DataDir.
+// Returns the logger and a cleanup function that closes the log file.
+func proxyLogger(cfg Config) (*log.Logger, func()) {
 	logPath := filepath.Join(cfg.DataDir, "proxy.log")
 	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600) //nolint:gosec // logPath from Config.DataDir
 	if err != nil {
-		return log.New(io.Discard, "", 0)
+		return log.New(io.Discard, "", 0), func() {}
 	}
-	return log.New(f, fmt.Sprintf("[proxy:%s] ", cfg.Name), log.LstdFlags)
+	return log.New(f, fmt.Sprintf("[proxy:%s] ", cfg.Name), log.LstdFlags), func() { _ = f.Close() }
 }
 
 // proxyAttach tries lease-based attach (GET /daemon/attach). Returns:
