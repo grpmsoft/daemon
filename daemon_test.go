@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -286,6 +287,12 @@ func TestDaemon_Start_HealthCheckFails_ReturnsError(t *testing.T) {
 	if !strings.Contains(err.Error(), "health check failed") {
 		t.Errorf("error %q does not contain %q", err, "health check failed")
 	}
+	if !strings.Contains(err.Error(), "killed") {
+		t.Errorf("error %q does not contain %q", err, "killed")
+	}
+	if inner.killCallCount != 1 {
+		t.Errorf("KillProcess must be called once to clean up orphan, got %d", inner.killCallCount)
+	}
 }
 
 func TestDaemon_Start_ContextCancelled_ReturnsError(t *testing.T) {
@@ -307,6 +314,153 @@ func TestDaemon_Start_ContextCancelled_ReturnsError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "context cancelled") {
 		t.Errorf("error %q does not contain %q", err, "context cancelled")
+	}
+	// Child must be killed even on context cancellation.
+	if procs.killCallCount != 1 {
+		t.Errorf("KillProcess must be called once to clean up orphan, got %d", procs.killCallCount)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Tests: Start — orphan cleanup (D8 from Fable review)
+// ---------------------------------------------------------------------------
+
+func TestStart_KillsOrphanOnHealthTimeout(t *testing.T) {
+	const wantPID = 5555
+	inner := &mockProcessManager{startPID: wantPID}
+	pids := &pidStoreMock{}
+	health := &mockHealthChecker{waitErr: errors.New("health timeout: no response after 500ms")}
+
+	hook := &hookProcessManager{
+		inner: inner,
+		onStart: func() {
+			pids.saved = &PIDInfo{PID: wantPID, Port: 7070, Name: "testapp"}
+		},
+	}
+
+	d := NewWithDeps(Config{
+		Name:       "testapp",
+		DataDir:    t.TempDir(),
+		Timeout:    500 * time.Millisecond,
+		HealthPath: "/health",
+	}, pids, hook, health)
+
+	err := d.Start(context.Background(), "/usr/bin/app", nil)
+
+	// Must return error.
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+
+	// Error must mention health check failure.
+	if !strings.Contains(err.Error(), "health check failed") {
+		t.Errorf("error %q must contain %q", err, "health check failed")
+	}
+
+	// Error must mention the child was killed.
+	if !strings.Contains(err.Error(), "killed") {
+		t.Errorf("error %q must contain %q", err, "killed")
+	}
+
+	// Error must include pid for operator diagnostics.
+	if !strings.Contains(err.Error(), "5555") {
+		t.Errorf("error %q must contain pid %q", err, "5555")
+	}
+
+	// KillProcess must be called exactly once with the spawned PID.
+	if inner.killCallCount != 1 {
+		t.Errorf("KillProcess call count = %d, want 1", inner.killCallCount)
+	}
+}
+
+func TestStart_KillsOrphanOnPIDFileTimeout(t *testing.T) {
+	// pids.saved stays nil → waitForPIDFile times out → orphan must be killed.
+	pids := &pidStoreMock{}
+	procs := &mockProcessManager{startPID: 6666}
+	health := &mockHealthChecker{}
+
+	d := NewWithDeps(Config{
+		Name:       "testapp",
+		DataDir:    t.TempDir(),
+		Timeout:    200 * time.Millisecond,
+		HealthPath: "/health",
+	}, pids, procs, health)
+
+	err := d.Start(context.Background(), "/usr/bin/app", nil)
+
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+
+	// Error must mention the child was killed.
+	if !strings.Contains(err.Error(), "killed") {
+		t.Errorf("error %q must contain %q", err, "killed")
+	}
+
+	// Error must include pid.
+	if !strings.Contains(err.Error(), "6666") {
+		t.Errorf("error %q must contain pid %q", err, "6666")
+	}
+
+	// KillProcess must be called exactly once.
+	if procs.killCallCount != 1 {
+		t.Errorf("KillProcess call count = %d, want 1", procs.killCallCount)
+	}
+}
+
+func TestReadLogTail(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+		n       int
+		want    string
+	}{
+		{"empty file", "", 5, ""},
+		{"fewer lines than n", "line1\nline2\n", 5, "line1\nline2"},
+		{"exact n lines", "a\nb\nc\n", 3, "a\nb\nc"},
+		{"more lines than n", "1\n2\n3\n4\n5\n", 2, "4\n5"},
+		{"single line no newline", "hello", 3, "hello"},
+		{"zero n", "data\n", 0, ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.content == "" && tt.n > 0 {
+				// Test empty file: write empty content.
+				f := filepath.Join(t.TempDir(), "test.log")
+				if writeErr := os.WriteFile(f, []byte{}, 0o600); writeErr != nil {
+					t.Fatal(writeErr)
+				}
+				got := readLogTail(f, tt.n)
+				if got != tt.want {
+					t.Errorf("readLogTail(%q, %d) = %q, want %q", f, tt.n, got, tt.want)
+				}
+				return
+			}
+
+			f := filepath.Join(t.TempDir(), "test.log")
+			if writeErr := os.WriteFile(f, []byte(tt.content), 0o600); writeErr != nil {
+				t.Fatal(writeErr)
+			}
+			got := readLogTail(f, tt.n)
+			if got != tt.want {
+				t.Errorf("readLogTail(%q, %d) = %q, want %q", f, tt.n, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestReadLogTail_MissingFile(t *testing.T) {
+	got := readLogTail("/nonexistent/path/daemon.log", 10)
+	if got != "" {
+		t.Errorf("readLogTail for missing file = %q, want empty", got)
+	}
+}
+
+func TestReadLogTail_EmptyPath(t *testing.T) {
+	got := readLogTail("", 10)
+	if got != "" {
+		t.Errorf("readLogTail for empty path = %q, want empty", got)
 	}
 }
 

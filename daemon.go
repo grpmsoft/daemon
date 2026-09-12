@@ -28,6 +28,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -98,16 +99,27 @@ func (d *Daemon) Start(ctx context.Context, binary string, args []string) error 
 	}
 
 	if err := d.waitForPIDFile(ctx, pid); err != nil {
-		return fmt.Errorf("daemon %s started (pid %d) but did not become ready: %w", d.cfg.Name, pid, err)
+		_ = d.procs.KillProcess(ctx, pid, 5*time.Second)
+		tail := readLogTail(logFile, 20)
+		if tail != "" {
+			return fmt.Errorf("daemon %s (pid %d) did not become ready, killed: %w\nlog tail:\n%s", d.cfg.Name, pid, err, tail)
+		}
+		return fmt.Errorf("daemon %s (pid %d) did not become ready, killed: %w", d.cfg.Name, pid, err)
 	}
 
 	data, loadErr := d.pids.Load()
 	if loadErr != nil {
-		return fmt.Errorf("daemon %s started but pid file unreadable: %w", d.cfg.Name, loadErr)
+		_ = d.procs.KillProcess(ctx, pid, 5*time.Second)
+		return fmt.Errorf("daemon %s (pid %d) started but pid file unreadable, killed: %w", d.cfg.Name, pid, loadErr)
 	}
 
 	if err := d.health.WaitUntilReady(data.Port, d.cfg.HealthPath, d.cfg.Timeout); err != nil {
-		return fmt.Errorf("daemon %s health check failed: %w", d.cfg.Name, err)
+		_ = d.procs.KillProcess(ctx, pid, 5*time.Second)
+		tail := readLogTail(logFile, 20)
+		if tail != "" {
+			return fmt.Errorf("daemon %s (pid %d) health check failed, killed: %w\nlog tail:\n%s", d.cfg.Name, pid, err, tail)
+		}
+		return fmt.Errorf("daemon %s (pid %d) health check failed, killed: %w", d.cfg.Name, pid, err)
 	}
 
 	return nil
@@ -152,16 +164,19 @@ func (d *Daemon) startWithLock(ctx context.Context, binary string, args []string
 	go func() { _ = cmd.Wait() }()
 
 	if err := d.waitForPIDFile(ctx, pid); err != nil {
-		return 0, fmt.Errorf("daemon %s started (pid %d) but did not become ready: %w", d.cfg.Name, pid, err)
+		_ = d.procs.KillProcess(ctx, pid, 5*time.Second)
+		return 0, fmt.Errorf("daemon %s (pid %d) did not become ready, killed: %w", d.cfg.Name, pid, err)
 	}
 
 	data, loadErr := d.pids.Load()
 	if loadErr != nil {
-		return 0, fmt.Errorf("daemon %s started but pid file unreadable: %w", d.cfg.Name, loadErr)
+		_ = d.procs.KillProcess(ctx, pid, 5*time.Second)
+		return 0, fmt.Errorf("daemon %s (pid %d) started but pid file unreadable, killed: %w", d.cfg.Name, pid, loadErr)
 	}
 
 	if err := d.health.WaitUntilReady(data.Port, d.cfg.HealthPath, d.cfg.Timeout); err != nil {
-		return 0, fmt.Errorf("daemon %s health check failed: %w", d.cfg.Name, err)
+		_ = d.procs.KillProcess(ctx, pid, 5*time.Second)
+		return 0, fmt.Errorf("daemon %s (pid %d) health check failed, killed: %w", d.cfg.Name, pid, err)
 	}
 
 	return data.Port, nil
@@ -187,6 +202,23 @@ func (d *Daemon) waitForPIDFile(ctx context.Context, expectedPID int) error {
 
 		time.Sleep(200 * time.Millisecond)
 	}
+}
+
+// readLogTail returns the last n lines from the log file for diagnostic messages.
+// Returns "" if the file does not exist, is empty, or cannot be read.
+func readLogTail(logFile string, n int) string {
+	if logFile == "" || n <= 0 {
+		return ""
+	}
+	data, err := os.ReadFile(logFile) //nolint:gosec // trusted path from DataDir
+	if err != nil || len(data) == 0 {
+		return ""
+	}
+	lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+	if len(lines) > n {
+		lines = lines[len(lines)-n:]
+	}
+	return strings.Join(lines, "\n")
 }
 
 // Stop reads the PID file, verifies the process identity (PID + binary path),
