@@ -403,7 +403,7 @@ func TestDaemon_Status_NoPIDFile_ReturnsStopped(t *testing.T) {
 
 func TestDaemon_Status_AlivePID_ReturnsRunning(t *testing.T) {
 	startTime := time.Date(2026, 9, 4, 10, 0, 0, 0, time.UTC)
-	pids := &pidStoreMock{saved: &PIDInfo{PID: 777, Port: 9000, Name: "testapp", StartTime: startTime}}
+	pids := &pidStoreMock{saved: &PIDInfo{PID: 777, Port: 9000, Name: "testapp", StartTime: startTime}, aliveResult: true}
 	procs := &mockProcessManager{aliveResult: true}
 	d := newMockDaemon(pids, procs, &mockHealthChecker{})
 
@@ -432,18 +432,19 @@ func TestDaemon_Status_AlivePID_ReturnsRunning(t *testing.T) {
 	}
 }
 
-func TestDaemon_Status_DeadPID_ReturnsStatusError(t *testing.T) {
-	pids := &pidStoreMock{saved: &PIDInfo{PID: 888, Port: 6060}}
+func TestDaemon_Status_LockNotHeld_ReturnsStopped(t *testing.T) {
+	// Lock not held (aliveResult=false) → daemon not running → StatusStopped.
+	pids := &pidStoreMock{saved: &PIDInfo{PID: 888, Port: 6060}, aliveResult: false}
 	procs := &mockProcessManager{aliveResult: false}
 	d := newMockDaemon(pids, procs, &mockHealthChecker{})
 
 	info, err := d.Status()
 
 	if err != nil {
-		t.Fatalf("Status must not return an error for a dead PID: %v", err)
+		t.Fatalf("Status must not return an error: %v", err)
 	}
-	if info.Status != StatusError {
-		t.Errorf("got %v, want %v", info.Status, StatusError)
+	if info.Status != StatusStopped {
+		t.Errorf("got %v, want %v (lock not held = stopped)", info.Status, StatusStopped)
 	}
 	if info.PID != 888 {
 		t.Errorf("PID must be preserved in StatusError, got %v", info.PID)
@@ -454,7 +455,7 @@ func TestDaemon_Status_DeadPID_ReturnsStatusError(t *testing.T) {
 }
 
 func TestDaemon_Status_ZeroStartTime_UptimeIsZero(t *testing.T) {
-	pids := &pidStoreMock{saved: &PIDInfo{PID: 100, Port: 8080}} // StartTime is zero
+	pids := &pidStoreMock{saved: &PIDInfo{PID: 100, Port: 8080}, aliveResult: true}
 	procs := &mockProcessManager{aliveResult: true}
 	d := newMockDaemon(pids, procs, &mockHealthChecker{})
 

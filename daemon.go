@@ -83,9 +83,8 @@ func (d *Daemon) Start(ctx context.Context, binary string, args []string) error 
 		return fmt.Errorf("create data dir %s: %w", d.cfg.DataDir, err)
 	}
 
-	if err := d.pids.Clear(); err != nil {
-		return fmt.Errorf("clear stale pid: %w", err)
-	}
+	// Note: PID file is NOT cleared/deleted — it may be locked by the new
+	// inherited-lock mechanism. Stale data is handled by the lock protocol.
 
 	logFile := filepath.Join(d.cfg.DataDir, d.cfg.Name+".log")
 	env := []string{
@@ -138,12 +137,11 @@ func (d *Daemon) startWithLock(ctx context.Context, binary string, args []string
 	cmd.Stdout = logF
 	cmd.Stderr = logF
 	cmd.SysProcAttr = detachedProcAttr()
-	cmd.ExtraFiles = []*os.File{lock.File()} // fd 3 in child
 	cmd.Env = append(os.Environ(),
 		"DAEMON_MODE=1",
 		fmt.Sprintf("DAEMON_DATA_DIR=%s", d.cfg.DataDir),
-		"DAEMON_PIDFD=3",
 	)
+	setupExtraFiles(cmd, lock)
 
 	if err := cmd.Start(); err != nil {
 		return 0, fmt.Errorf("start daemon %s: %w", d.cfg.Name, err)
@@ -209,21 +207,24 @@ func (d *Daemon) Stop(ctx context.Context) error {
 	if data.Port > 0 {
 		shutdownURL := fmt.Sprintf("http://127.0.0.1:%d/daemon/shutdown", data.Port)
 		reqCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		defer cancel()
 		req, reqErr := http.NewRequestWithContext(reqCtx, http.MethodPost, shutdownURL, nil)
 		if reqErr == nil {
-			client := &http.Client{Timeout: 5 * time.Second}
-			if resp, doErr := client.Do(req); doErr == nil {
+			client := &http.Client{}
+			resp, doErr := client.Do(req)
+			cancel()
+			if doErr == nil {
 				_ = resp.Body.Close()
-				// Wait for process to exit gracefully.
-				deadline := time.Now().Add(10 * time.Second)
-				for time.Now().Before(deadline) {
-					if !d.pids.IsAlive() {
-						return nil
-					}
-					time.Sleep(200 * time.Millisecond)
+				// Wait for lock release (daemon exiting). Respects ctx.
+				if waitErr := waitForLockRelease(ctx, d.pids, 10*time.Second); waitErr == nil {
+					return nil
 				}
+				// Timeout waiting — fall through to kill.
+			} else if ctx.Err() != nil {
+				// ctx cancelled — don't escalate to kill, just return.
+				return ctx.Err()
 			}
+		} else {
+			cancel()
 		}
 	}
 
@@ -251,9 +252,9 @@ func (d *Daemon) Status() (*Info, error) {
 		}, nil
 	}
 
-	if !d.procs.IsProcessAlive(data.PID) {
+	if !d.pids.IsAlive() {
 		return &Info{
-			Status: StatusError,
+			Status: StatusStopped,
 			PID:    data.PID,
 			Port:   data.Port,
 			Name:   d.cfg.Name,
@@ -472,6 +473,26 @@ func Serve(ctx context.Context, cfg Config, handler http.Handler) error {
 	}
 
 	return nil
+}
+
+// waitForLockRelease polls IsAlive under ctx until the lock is released or deadline.
+func waitForLockRelease(ctx context.Context, pids PIDStore, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	tick := time.NewTicker(200 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-tick.C:
+			if !pids.IsAlive() {
+				return nil
+			}
+			if time.Now().After(deadline) {
+				return fmt.Errorf("timeout waiting for daemon to exit")
+			}
+		}
+	}
 }
 
 // buildDaemonMux creates the HTTP mux with health, connect/disconnect, shutdown endpoints.

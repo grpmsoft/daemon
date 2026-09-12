@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/grpmsoft/daemon/internal/pidlock"
 )
@@ -34,15 +35,19 @@ func EnsureRunning(ctx context.Context, cfg Config, binary string, args []string
 	// Try to acquire the PID file lock.
 	lock, err := pidlock.TryLock(pidPath)
 	if errors.Is(err, pidlock.ErrLocked) {
-		// Daemon is running — read port from PID file.
-		return readPortFromPIDFile(pidPath)
+		// Lock held = daemon running OR another EnsureRunning is spawning.
+		// Poll until valid PID data appears (child writes after Serve starts).
+		return waitForPort(ctx, pidPath, cfg.Timeout)
 	}
 	if err != nil {
 		return 0, fmt.Errorf("ensure running: %w", err)
 	}
 
-	// We hold the lock — no daemon is running. Start one.
-	// Pass the lock to Start which will hand the fd to the child.
+	// We hold the lock — no daemon is running.
+	// Truncate immediately so concurrent ErrLocked readers never see stale data.
+	_ = lock.WriteData([]byte{})
+
+	// Start daemon, pass locked fd to child.
 	d := New(cfg)
 
 	port, startErr := d.startWithLock(ctx, binary, args, lock)
@@ -52,12 +57,37 @@ func EnsureRunning(ctx context.Context, cfg Config, binary string, args []string
 	}
 
 	// Parent closes its fd — child holds the lock via inherited fd.
-	// Do NOT call lock.Release() here — just close the file.
-	// Release would unlock, but closing the parent's fd is safe because
-	// the child's inherited fd keeps the open file description alive.
 	_ = lock.File().Close()
 
 	return port, nil
+}
+
+// waitForPort polls the PID file until it contains a valid port or ctx expires.
+// Used when TryLock returns ErrLocked — another instance holds the lock
+// (either a running daemon or a concurrent EnsureRunning still spawning).
+func waitForPort(ctx context.Context, pidPath string, timeout time.Duration) (int, error) {
+	deadline := time.Now().Add(timeout)
+	for {
+		select {
+		case <-ctx.Done():
+			return 0, fmt.Errorf("ensure running: %w", ctx.Err())
+		default:
+		}
+
+		if time.Now().After(deadline) {
+			return 0, fmt.Errorf("ensure running: %w: waiting for daemon to write port", ErrStartTimeout)
+		}
+
+		data, err := pidlock.ReadLocked(pidPath)
+		if err == nil && len(data) > 2 { // skip empty or "{}"
+			info, parseErr := parsePIDData(data)
+			if parseErr == nil && info.Port > 0 {
+				return info.Port, nil
+			}
+		}
+
+		time.Sleep(100 * time.Millisecond)
+	}
 }
 
 // readPortFromPIDFile reads the PID file (which may be locked by a running daemon)
