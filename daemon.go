@@ -97,6 +97,9 @@ func (d *Daemon) Start(ctx context.Context) (*Info, error) {
 	}
 	defer internal.Unlock(startupFile)
 
+	// Explicit Start overrides a previous stop decision.
+	clearStopIntent(d.cfg.DataDir, d.cfg.Name)
+
 	pidPath := d.pids.Path()
 	if pidlock.IsHeld(pidPath) {
 		data, _ := d.pids.Load()
@@ -119,6 +122,11 @@ func (d *Daemon) EnsureRunning(ctx context.Context) (*Info, error) {
 	}
 	defer internal.Unlock(startupFile)
 
+	// Stop-intent: refuse to auto-start if the user explicitly stopped.
+	if hasStopIntent(d.cfg.DataDir, d.cfg.Name) {
+		return nil, ErrStopIntent
+	}
+
 	pidPath := d.pids.Path()
 	if pidlock.IsHeld(pidPath) {
 		// Daemon already running — wait for port and return existing info.
@@ -135,6 +143,13 @@ func (d *Daemon) EnsureRunning(ctx context.Context) (*Info, error) {
 			return d.buildInfo(data), nil
 		}
 		// Daemon died while waiting — fall through to start.
+	}
+
+	// Spawn cooldown: refuse rapid retry after a recent spawn failure.
+	// Checked AFTER IsHeld so a running daemon is returned even if a stale
+	// cooldown marker exists from a previous failed attempt.
+	if d.cfg.SpawnCooldown > 0 && isCooldownActive(d.cfg.DataDir, d.cfg.Name, d.cfg.SpawnCooldown) {
+		return nil, fmt.Errorf("ensure running %s: %w", d.cfg.Name, ErrSpawnCooldown)
 	}
 
 	return d.startLocked(ctx)
@@ -167,8 +182,12 @@ func (d *Daemon) startLocked(ctx context.Context) (*Info, error) {
 	_, startErr := d.startWithLock(ctx, lock)
 	if startErr != nil {
 		_ = lock.File().Close()
+		_ = writeCooldown(d.cfg.DataDir, d.cfg.Name)
 		return nil, fmt.Errorf("start %s: %w", d.cfg.Name, startErr)
 	}
+
+	// Successful start -- clear any stale cooldown from a previous failure.
+	clearCooldown(d.cfg.DataDir, d.cfg.Name)
 
 	// Parent closes fd — child holds lock via inherited fd (Unix)
 	// or via own TryLock (Windows, after setupExtraFiles released parent's).
@@ -345,6 +364,10 @@ func readLogTail(logFile string, n int) string {
 
 // Stop gracefully shuts down the daemon. Serialized on the startup lock.
 // Idempotent: returns nil if the daemon is already stopped.
+//
+// On success, writes a stop-intent marker so that EnsureRunning will
+// not auto-restart the daemon. Use Start() or Restart() to clear the
+// marker and explicitly restart.
 func (d *Daemon) Stop(ctx context.Context) error {
 	if err := d.cfg.Validate(); err != nil {
 		return err
@@ -355,7 +378,11 @@ func (d *Daemon) Stop(ctx context.Context) error {
 	}
 	defer internal.Unlock(startupFile)
 
-	return d.stopLocked(ctx)
+	stopErr := d.stopLocked(ctx)
+	if stopErr == nil {
+		_ = writeStopIntent(d.cfg.DataDir, d.cfg.Name)
+	}
+	return stopErr
 }
 
 // Restart stops a running daemon (if any) and starts a new one, under a
@@ -371,6 +398,9 @@ func (d *Daemon) Restart(ctx context.Context) (*Info, error) {
 		return nil, fmt.Errorf("restart %s: %w", d.cfg.Name, err)
 	}
 	defer internal.Unlock(startupFile)
+
+	// Explicit Restart overrides a previous stop decision.
+	clearStopIntent(d.cfg.DataDir, d.cfg.Name)
 
 	_ = d.stopLocked(ctx)
 	return d.startLocked(ctx)

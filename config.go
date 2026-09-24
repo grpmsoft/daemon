@@ -79,6 +79,13 @@ type Config struct {
 	// curl debugging of the app handler keeps working. MCP deployments
 	// should set this to true.
 	RequireToken bool `json:"requireToken"`
+
+	// SpawnCooldown is the duration to wait after a spawn failure before
+	// retrying. During cooldown, EnsureRunning returns ErrSpawnCooldown
+	// instead of attempting another spawn. Prevents rapid respawn loops
+	// when multiple MCP agents call EnsureRunning after a spawn failure.
+	// Default: 5s. Set to -1 to disable.
+	SpawnCooldown time.Duration `json:"spawnCooldown"`
 }
 
 // Validate checks the configuration for invalid values.
@@ -123,6 +130,9 @@ func (c *Config) applyDefaults() {
 		if abs, err := filepath.Abs(c.Dir); err == nil {
 			c.Dir = abs
 		}
+	}
+	if c.SpawnCooldown == 0 {
+		c.SpawnCooldown = 5 * time.Second
 	}
 }
 
