@@ -13,7 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`ProcessManager.Start(ctx, StartSpec)` replaces `StartDetached(binary, args, logFile, env)`** — the new `StartSpec` struct consolidates all spawn parameters: `Binary`, `Args`, `Dir`, `Env`, `LogFile`, `ExtraFiles`. Consumers implementing `ProcessManager` must update their method signature
 - **`Config.DisableTokenAuth` replaces `Config.RequireToken`** — inverted default: zero value (`false`) means token IS required (secure by default). Migration: `RequireToken: true` → remove the field entirely. `RequireToken: false` → set `DisableTokenAuth: true`
 - **`HealthChecker.WaitUntilReady(ctx, port, healthPath, timeout)`** — `ctx context.Context` parameter added as the first argument. Consumers implementing `HealthChecker` must update their method signature
-- **`Config.ShutdownTimeout`** (`time.Duration`, default `10s`) replaces hardcoded 5s/10s drain delays — `Serve` uses this for HTTP server drain; `Stop` client waits `ShutdownTimeout` plus margin then falls back to kill. The budget is split across phases: HTTP shutdown request (half), lock release wait (full), kill grace (half)
+- **`Config.ShutdownTimeout`** (`time.Duration`, default `10s`) — the daemon's graceful drain budget. `Serve` passes this to `server.Shutdown`; `Stop()` sends a shutdown request (fixed 2s timeout), waits `ShutdownTimeout + 2s` for the daemon to release the PID lock, then escalates to kill with a fixed 3s grace. Worst case: `ShutdownTimeout + 7s`
 
 ### Added
 
@@ -26,7 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **StateNew connection drain** — `ConnState` callback tracks pre-dialed connections in `StateNew`. Before `Shutdown`, these connections are closed explicitly, eliminating the 5-second stdlib drain delay that occurred under `-race` and connection pooling
+- **StateNew connection drain** — `ConnState` callback tracks pre-dialed connections in `StateNew`. Before `Shutdown`, these connections are closed explicitly, eliminating the 5-second stdlib drain delay that occurred with pooled connections
 - **EnsureRunning check order** — fixed to: (1) IsHeld → return existing daemon, (2) stop-intent → `ErrStopIntent`, (3) cooldown → `ErrSpawnCooldown`, (4) start. A running daemon is returned even if a stale stop-intent or cooldown marker exists
 
 ## [0.3.3] - 2026-09-12

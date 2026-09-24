@@ -182,15 +182,7 @@ The cooldown marker is time-based: it expires after `SpawnCooldown` elapses. A s
 
 ## Shutdown Timeout
 
-`Config.ShutdownTimeout` (default `10s`) controls the total time budget for graceful shutdown. The budget is split across shutdown phases:
-
-| Phase | Budget | Description |
-|-------|--------|-------------|
-| HTTP shutdown request | `ShutdownTimeout / 2` | `Stop()` client sends POST /daemon/shutdown |
-| Wait for lock release | `ShutdownTimeout` | Client waits for daemon process to exit |
-| Kill grace period | `ShutdownTimeout / 2` | Fallback: SIGTERM/TerminateProcess if still running |
-
-On the server side, `Serve()` uses the same timeout for `http.Server.Shutdown` drain.
+`Config.ShutdownTimeout` (default `10s`) is the daemon's graceful drain budget. `Serve()` passes it to `http.Server.Shutdown`. On the client side, `Stop()` sends a shutdown request (fixed 2s timeout), waits `ShutdownTimeout + 2s` for the daemon to release the PID lock, then escalates to kill with a fixed 3s grace. Worst case: `ShutdownTimeout + 7s`.
 
 ```go
 cfg := daemon.Config{

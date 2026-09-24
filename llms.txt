@@ -41,7 +41,7 @@ Spawn cooldown: after spawn failure, EnsureRunning returns ErrSpawnCooldown for 
 - IdleTimeout (time.Duration, 0=disabled) -- auto-shutdown
 - DisableTokenAuth (bool, default false) -- skip bearer auth for app handler
 - SpawnCooldown (time.Duration, default 5s, -1=disabled) -- cooldown after spawn failure
-- ShutdownTimeout (time.Duration, default 10s) -- total graceful shutdown budget
+- ShutdownTimeout (time.Duration, default 10s) -- daemon drain budget; Stop worst case = ShutdownTimeout + 7s
 
 ### Daemon Methods (all return *Info except Stop, Hold, Release)
 
