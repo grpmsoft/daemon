@@ -48,6 +48,7 @@ import (
 // It depends on PIDStore, ProcessManager, and HealthChecker interfaces —
 // not on concrete implementations. New() wires the defaults.
 type Daemon struct {
+	mu     sync.Mutex // in-process serialization (complements the file lock)
 	cfg    Config
 	pids   PIDStore
 	procs  ProcessManager
@@ -88,6 +89,8 @@ func NewWithDeps(cfg Config, pids PIDStore, procs ProcessManager, health HealthC
 //   - Under startup lock, check if daemon already running (PID file held)
 //   - Delegate to startLocked (acquire PID lock, spawn, health check)
 func (d *Daemon) Start(ctx context.Context) (*Info, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
 	if err := d.cfg.Validate(); err != nil {
 		return nil, err
 	}
@@ -113,6 +116,8 @@ func (d *Daemon) Start(ctx context.Context) (*Info, error) {
 // info. If not, starts a new one. Safe for concurrent callers — all serialize
 // on the startup lock.
 func (d *Daemon) EnsureRunning(ctx context.Context) (*Info, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
 	if err := d.cfg.Validate(); err != nil {
 		return nil, err
 	}
@@ -369,6 +374,8 @@ func readLogTail(logFile string, n int) string {
 // Stop does NOT prevent EnsureRunning from restarting the daemon. Use
 // Hold() to stop the daemon AND block automatic restarts.
 func (d *Daemon) Stop(ctx context.Context) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
 	if err := d.cfg.Validate(); err != nil {
 		return err
 	}
@@ -385,6 +392,8 @@ func (d *Daemon) Stop(ctx context.Context) error {
 // EnsureRunning from restarting it. Use Release() or Start() to clear
 // the marker and allow restarts again.
 func (d *Daemon) Hold(ctx context.Context) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
 	if err := d.cfg.Validate(); err != nil {
 		return err
 	}
@@ -409,6 +418,8 @@ func (d *Daemon) Release() {
 // occur if Restart called the public Stop() then Start() (each acquires
 // the startup lock independently).
 func (d *Daemon) Restart(ctx context.Context) (*Info, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
 	if err := d.cfg.Validate(); err != nil {
 		return nil, err
 	}

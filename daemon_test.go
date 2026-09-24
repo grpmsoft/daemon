@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -82,12 +83,12 @@ type mockProcessManager struct {
 	startErr       error
 	killErr        error
 	aliveResult    bool
-	startCallCount int
-	killCallCount  int
+	startCallCount atomic.Int32
+	killCallCount  atomic.Int32
 }
 
 func (m *mockProcessManager) Start(_ context.Context, _ StartSpec) (int, error) {
-	m.startCallCount++
+	m.startCallCount.Add(1)
 	if m.startErr != nil {
 		return 0, m.startErr
 	}
@@ -95,7 +96,7 @@ func (m *mockProcessManager) Start(_ context.Context, _ StartSpec) (int, error) 
 }
 
 func (m *mockProcessManager) KillProcess(_ context.Context, _ int, _ time.Duration) error {
-	m.killCallCount++
+	m.killCallCount.Add(1)
 	return m.killErr
 }
 
@@ -127,11 +128,11 @@ var _ HealthChecker = (*mockHealthChecker)(nil)
 type hookProcessManager struct {
 	inner          *mockProcessManager
 	onStart        func()
-	startCallCount int
+	startCallCount atomic.Int32
 }
 
 func (h *hookProcessManager) Start(ctx context.Context, spec StartSpec) (int, error) {
-	h.startCallCount++
+	h.startCallCount.Add(1)
 	pid, err := h.inner.Start(ctx, spec)
 	if err == nil && h.onStart != nil {
 		h.onStart()
@@ -587,8 +588,8 @@ func TestDaemon_Stop_DeadProcess_Idempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if procs.killCallCount != 0 {
-		t.Errorf("KillProcess must NOT be called for a dead process, got %d calls", procs.killCallCount)
+	if procs.killCallCount.Load() != 0 {
+		t.Errorf("KillProcess must NOT be called for a dead process, got %d calls", procs.killCallCount.Load())
 	}
 }
 
@@ -614,8 +615,8 @@ func TestDaemon_Stop_AliveProcess_KillsProcess(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if procs.killCallCount != 1 {
-		t.Errorf("KillProcess must be called once, got %d", procs.killCallCount)
+	if procs.killCallCount.Load() != 1 {
+		t.Errorf("KillProcess must be called once, got %d", procs.killCallCount.Load())
 	}
 }
 
@@ -959,8 +960,8 @@ func TestDaemon_Stop_StalePID_Idempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Stop must be idempotent for stale PID: %v", err)
 	}
-	if procs.killCallCount != 0 {
-		t.Errorf("KillProcess must NOT be called for a stale PID, got %d calls", procs.killCallCount)
+	if procs.killCallCount.Load() != 0 {
+		t.Errorf("KillProcess must NOT be called for a stale PID, got %d calls", procs.killCallCount.Load())
 	}
 }
 
