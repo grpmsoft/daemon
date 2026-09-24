@@ -31,7 +31,11 @@ func TestHelperProcess(t *testing.T) {
 	if os.Getenv("DAEMON_MODE") != "1" {
 		t.Skip("helper process only")
 	}
-	cfg := daemon.Config{Name: itName, DataDir: os.Getenv("DAEMON_DATA_DIR")}
+	cfg := daemon.Config{
+		Name:             itName,
+		DataDir:          os.Getenv("DAEMON_DATA_DIR"),
+		DisableTokenAuth: true, // allow unauthenticated app requests in tests
+	}
 	if v := os.Getenv("IT_IDLE"); v != "" {
 		cfg.IdleTimeout, _ = time.ParseDuration(v)
 	}
@@ -101,8 +105,13 @@ func TestIntegration_StopHonoursDeadline(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Read token — required since v0.4.0 (DisableTokenAuth defaults to false).
+	_, token := readItPIDInfo(t, cfg.DataDir)
 	go func() {
-		_, _ = http.Get(fmt.Sprintf("http://127.0.0.1:%d/slow", port)) //nolint:noctx,gosec // test-only
+		req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet,
+			fmt.Sprintf("http://127.0.0.1:%d/slow", port), nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		_, _ = http.DefaultClient.Do(req) //nolint:bodyclose // test-only, we don't care about the response
 	}()
 	time.Sleep(200 * time.Millisecond)
 
@@ -358,6 +367,50 @@ func TestIntegration_AttachedClientsDoNotBlockStop(t *testing.T) {
 	}
 
 	_ = stdinR.Close()
+}
+
+// K1 regression: EnsureRunning → Stop → EnsureRunning must restart the daemon.
+// Stop alone must NOT prevent restarts (Hold is the opt-in for that).
+// This is the single most important scenario in the library.
+func TestIntegration_K1_StopDoesNotBlockEnsureRunning(t *testing.T) {
+	cfg := itConfig(t)
+	d := daemon.New(cfg)
+
+	// Step 1: start via EnsureRunning.
+	info, err := d.EnsureRunning(context.Background())
+	if err != nil {
+		t.Fatalf("first EnsureRunning: %v", err)
+	}
+	if info.Port == 0 {
+		t.Fatal("first EnsureRunning returned zero port")
+	}
+	if err := dial(info.Port); err != nil {
+		t.Fatalf("first daemon health check: %v", err)
+	}
+
+	// Step 2: stop.
+	if err := d.Stop(context.Background()); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for d.IsRunning() && time.Now().Before(deadline) {
+		time.Sleep(100 * time.Millisecond)
+	}
+	if d.IsRunning() {
+		t.Fatal("daemon did not stop within 10s")
+	}
+
+	// Step 3: EnsureRunning again — must restart, NOT return ErrStopIntent.
+	info2, err := d.EnsureRunning(context.Background())
+	if err != nil {
+		t.Fatalf("second EnsureRunning: %v (ErrStopIntent = K1 regression)", err)
+	}
+	if info2.Port == 0 {
+		t.Fatal("second EnsureRunning returned zero port")
+	}
+	if err := dial(info2.Port); err != nil {
+		t.Fatalf("second daemon health check: %v", err)
+	}
 }
 
 // Test 9: All existing tests pass unchanged — verified by running go test ./...

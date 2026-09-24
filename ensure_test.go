@@ -118,7 +118,7 @@ func TestEnsureRunning_ContextCancelled_ReturnsZeroPort(t *testing.T) {
 
 	port, err := EnsureRunning(ctx, cfg)
 
-	// Either a StartDetached error or context-cancelled error — both yield port=0.
+	// Either a Start error or context-cancelled error — both yield port=0.
 	_ = err
 	if port != 0 {
 		t.Errorf("cancelled context / bad binary must yield port=0, got %v", port)

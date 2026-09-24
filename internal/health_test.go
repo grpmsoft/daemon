@@ -1,6 +1,8 @@
 package internal
 
 import (
+	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -122,7 +124,7 @@ func TestWaitUntilReady(t *testing.T) {
 		defer srv.Close()
 
 		start := time.Now()
-		err := WaitUntilReady(extractPort(t, srv.URL), "/health", 5*time.Second)
+		err := WaitUntilReady(context.Background(), extractPort(t, srv.URL), "/health", 5*time.Second)
 		elapsed := time.Since(start)
 
 		if err != nil {
@@ -142,7 +144,7 @@ func TestWaitUntilReady(t *testing.T) {
 		}
 
 		start := time.Now()
-		err = WaitUntilReady(freePort, "/health", 600*time.Millisecond)
+		err = WaitUntilReady(context.Background(), freePort, "/health", 600*time.Millisecond)
 		elapsed := time.Since(start)
 
 		if err == nil {
@@ -176,9 +178,36 @@ func TestWaitUntilReady(t *testing.T) {
 			close(ready)
 		}()
 
-		err := WaitUntilReady(extractPort(t, srv.URL), "/health", 5*time.Second)
+		err := WaitUntilReady(context.Background(), extractPort(t, srv.URL), "/health", 5*time.Second)
 		if err != nil {
 			t.Fatalf("should succeed once the server becomes ready within the timeout: %v", err)
+		}
+	})
+
+	t.Run("returns ctx error when context is cancelled", func(t *testing.T) {
+		// Nothing listening -- but context cancelled immediately, so the
+		// function should return ctx.Err() without waiting for timeout.
+		freePort, err := FindFreePort()
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel() // pre-cancel
+
+		start := time.Now()
+		waitErr := WaitUntilReady(ctx, freePort, "/health", 10*time.Second)
+		elapsed := time.Since(start)
+
+		if waitErr == nil {
+			t.Fatal("expected error from cancelled context")
+		}
+		if !errors.Is(waitErr, context.Canceled) {
+			t.Errorf("expected context.Canceled, got: %v", waitErr)
+		}
+		// Must return quickly, not wait 10s.
+		if elapsed > 2*time.Second {
+			t.Errorf("WaitUntilReady took %v with cancelled ctx, expected prompt return", elapsed)
 		}
 	})
 }

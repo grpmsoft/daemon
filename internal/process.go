@@ -19,5 +19,5 @@ func FindFreePort() (int, error) {
 	return port, nil
 }
 
-// StartDetached, KillProcess, IsProcessAlive are defined in
+// StartProcess, KillProcess, IsProcessAlive are defined in
 // platform-specific files (process_windows.go, process_unix.go).

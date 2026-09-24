@@ -74,11 +74,31 @@ type Config struct {
 	// CWD (which may be deleted or unmounted after start).
 	Dir string `json:"dir"`
 
-	// RequireToken, when true, requires the bearer token for the application
-	// handler (everything outside /health and /daemon/*). Default false so
-	// curl debugging of the app handler keeps working. MCP deployments
-	// should set this to true.
-	RequireToken bool `json:"requireToken"`
+	// DisableTokenAuth, when true, skips bearer token authentication for
+	// the application handler (everything outside /health and /daemon/*).
+	// Default false = token required (secure by default). Set to true only
+	// for local curl debugging.
+	//
+	// Breaking change v0.4.0: replaces RequireToken (inverted semantics).
+	// Migration: RequireToken: true -> remove field (default secure).
+	//            RequireToken: false -> DisableTokenAuth: true.
+	DisableTokenAuth bool `json:"disableTokenAuth"`
+
+	// SpawnCooldown is the duration to wait after a spawn failure before
+	// retrying. During cooldown, EnsureRunning returns ErrSpawnCooldown
+	// instead of attempting another spawn. Prevents rapid respawn loops
+	// when multiple MCP agents call EnsureRunning after a spawn failure.
+	// Default: 5s. Set to -1 to disable.
+	SpawnCooldown time.Duration `json:"spawnCooldown"`
+
+	// ShutdownTimeout is the total time budget for graceful shutdown.
+	// stopLocked divides this budget across its phases:
+	//   - HTTP shutdown request: ShutdownTimeout / 2
+	//   - Wait for lock release: ShutdownTimeout
+	//   - Kill grace period:     ShutdownTimeout / 2
+	// Also used for kill grace in startWithLock failure cleanup.
+	// Default: 10s.
+	ShutdownTimeout time.Duration `json:"shutdownTimeout,omitempty"`
 }
 
 // Validate checks the configuration for invalid values.
@@ -96,6 +116,9 @@ func (c *Config) Validate() error {
 	}
 	if c.HealthPath == "/" {
 		return fmt.Errorf("%w: HealthPath %q conflicts with root handler", ErrInvalidConfig, c.HealthPath)
+	}
+	if strings.HasPrefix(c.HealthPath, "/daemon/") {
+		return fmt.Errorf("%w: HealthPath %q conflicts with daemon control endpoints", ErrInvalidConfig, c.HealthPath)
 	}
 	return nil
 }
@@ -123,6 +146,12 @@ func (c *Config) applyDefaults() {
 		if abs, err := filepath.Abs(c.Dir); err == nil {
 			c.Dir = abs
 		}
+	}
+	if c.SpawnCooldown == 0 {
+		c.SpawnCooldown = 5 * time.Second
+	}
+	if c.ShutdownTimeout == 0 {
+		c.ShutdownTimeout = 10 * time.Second
 	}
 }
 
@@ -157,9 +186,19 @@ type PIDInfo struct {
 	Token     string    `json:"token,omitempty"`
 }
 
+// StartSpec describes how to spawn a daemon child process.
+type StartSpec struct {
+	Binary     string     // executable path
+	Args       []string   // command-line arguments
+	Dir        string     // working directory
+	Env        []string   // environment variables
+	LogFile    string     // stderr/stdout log file path
+	ExtraFiles []*os.File // additional file descriptors (e.g., PID lock fd)
+}
+
 // ProcessManager abstracts platform-specific process lifecycle operations.
 type ProcessManager interface {
-	StartDetached(binary string, args []string, logFile string, env []string) (pid int, err error)
+	Start(ctx context.Context, spec StartSpec) (pid int, err error)
 	KillProcess(ctx context.Context, pid int, grace time.Duration) error
 	IsProcessAlive(pid int) bool
 }
@@ -167,5 +206,5 @@ type ProcessManager interface {
 // HealthChecker abstracts daemon readiness verification.
 type HealthChecker interface {
 	Check(port int, healthPath string) error
-	WaitUntilReady(port int, healthPath string, timeout time.Duration) error
+	WaitUntilReady(ctx context.Context, port int, healthPath string, timeout time.Duration) error
 }

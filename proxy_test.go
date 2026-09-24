@@ -284,40 +284,21 @@ func TestProxy_NoPIDFile_ReturnsError(t *testing.T) {
 // Tests: proxyAttach fallback
 // ---------------------------------------------------------------------------
 
-// TestProxyAttach_FallbackOnNotFound verifies that proxyAttach falls back to
-// signalConnect when the daemon returns 404 for /daemon/attach (v0.3.0 compat).
-func TestProxyAttach_FallbackOnNotFound(t *testing.T) {
-	var connectCalled bool
-
-	// Simulate a v0.3.0 daemon: /daemon/attach returns 404, /daemon/connect works.
+// TestProxyAttach_NotFoundReturnsNil verifies that proxyAttach returns nil
+// when the daemon returns 404 for /daemon/attach. In v0.4.0+ there is no
+// fallback to connect/disconnect.
+func TestProxyAttach_NotFoundReturnsNil(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/daemon/attach":
-			http.NotFound(w, r)
-		case "/daemon/connect":
-			connectCalled = true
-			w.WriteHeader(http.StatusNoContent)
-		case "/daemon/disconnect":
-			w.WriteHeader(http.StatusNoContent)
-		default:
-			http.NotFound(w, r)
-		}
+		http.NotFound(w, r)
 	}))
 	defer srv.Close()
 
 	plog := log.New(io.Discard, "", 0)
-	cancelFn, connected := proxyAttach(context.Background(), srv.URL, "", plog)
+	cancelFn := proxyAttach(context.Background(), srv.URL, "", plog)
 
-	// Must have fallen back to connect/disconnect.
 	if cancelFn != nil {
-		t.Error("cancelFn should be nil in fallback mode")
+		t.Error("cancelFn should be nil when attach returns 404")
 		cancelFn()
-	}
-	if !connected {
-		t.Error("should report connected=true after fallback to signalConnect")
-	}
-	if !connectCalled {
-		t.Error("/daemon/connect should have been called in fallback mode")
 	}
 }
 
@@ -341,13 +322,10 @@ func TestProxyAttach_LeaseMode(t *testing.T) {
 	defer srv.Close()
 
 	plog := log.New(io.Discard, "", 0)
-	cancelFn, connected := proxyAttach(context.Background(), srv.URL, "", plog)
+	cancelFn := proxyAttach(context.Background(), srv.URL, "", plog)
 
 	if cancelFn == nil {
 		t.Fatal("cancelFn should be non-nil in lease mode")
-	}
-	if connected {
-		t.Error("connected should be false in lease mode (only for fallback)")
 	}
 
 	// Clean up — cancel the attach context.

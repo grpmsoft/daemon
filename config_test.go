@@ -43,16 +43,20 @@ func TestConfig_ApplyDefaults_SetsZeroValues(t *testing.T) {
 	if cfg.HealthPath != "/health" {
 		t.Errorf("empty HealthPath should default to /health, got %v", cfg.HealthPath)
 	}
+	if cfg.ShutdownTimeout != 10*time.Second {
+		t.Errorf("zero ShutdownTimeout should default to 10s, got %v", cfg.ShutdownTimeout)
+	}
 }
 
 // TestConfig_ApplyDefaults_DoesNotOverrideNonZero verifies that applyDefaults
 // leaves already-set fields unchanged.
 func TestConfig_ApplyDefaults_DoesNotOverrideNonZero(t *testing.T) {
 	cfg := Config{
-		Name:       "test",
-		DataDir:    "/tmp",
-		Timeout:    60 * time.Second,
-		HealthPath: "/readyz",
+		Name:            "test",
+		DataDir:         "/tmp",
+		Timeout:         60 * time.Second,
+		HealthPath:      "/readyz",
+		ShutdownTimeout: 20 * time.Second,
 	}
 	cfg.applyDefaults()
 
@@ -61,6 +65,9 @@ func TestConfig_ApplyDefaults_DoesNotOverrideNonZero(t *testing.T) {
 	}
 	if cfg.HealthPath != "/readyz" {
 		t.Errorf("non-empty HealthPath must not be overridden, got %v", cfg.HealthPath)
+	}
+	if cfg.ShutdownTimeout != 20*time.Second {
+		t.Errorf("non-zero ShutdownTimeout must not be overridden, got %v", cfg.ShutdownTimeout)
 	}
 }
 
@@ -93,6 +100,8 @@ func TestConfig_Validate(t *testing.T) {
 		{"dotdot name", Config{Name: "..", DataDir: "/tmp"}, true},
 		{"empty datadir", Config{Name: "app", DataDir: ""}, true},
 		{"healthpath root", Config{Name: "app", DataDir: "/tmp", HealthPath: "/"}, true},
+		{"healthpath daemon prefix", Config{Name: "app", DataDir: "/tmp", HealthPath: "/daemon/health"}, true},
+		{"healthpath daemon slash", Config{Name: "app", DataDir: "/tmp", HealthPath: "/daemon/"}, true},
 		{"healthpath custom", Config{Name: "app", DataDir: "/tmp", HealthPath: "/ready"}, false},
 	}
 	for _, tt := range tests {

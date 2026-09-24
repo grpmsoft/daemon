@@ -125,9 +125,10 @@ func TestServe_StartsAndRespondsToHealthCheck(t *testing.T) {
 func TestServe_CustomHandler(t *testing.T) {
 	dir := t.TempDir()
 	cfg := Config{
-		Name:       "serve-custom",
-		DataDir:    dir,
-		HealthPath: "/health",
+		Name:             "serve-custom",
+		DataDir:          dir,
+		HealthPath:       "/health",
+		DisableTokenAuth: true, // allow unauthenticated access to custom handler
 	}
 
 	customHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -429,6 +430,200 @@ func TestServe_LockReleasedOnShutdown(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Tests: removed connect/disconnect endpoints (v0.4.0 breaking change)
+// ---------------------------------------------------------------------------
+
+// TestServe_ConnectEndpointRemoved verifies that POST /daemon/connect returns
+// 404 after removal in v0.4.0. ConnTracker is only managed via /daemon/attach.
+func TestServe_ConnectEndpointRemoved(t *testing.T) {
+	dir := t.TempDir()
+	cfg := Config{Name: "no-connect", DataDir: dir}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- Serve(ctx, cfg, nil) }()
+
+	store := newDefaultPIDStore(dir, "no-connect")
+	var port int
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		data, err := store.Load()
+		if err == nil && data.Port > 0 {
+			port = data.Port
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if port == 0 {
+		t.Fatal("PID file must be written within 5 seconds")
+	}
+
+	pidData, loadErr := store.Load()
+	if loadErr != nil {
+		t.Fatalf("load PID info: %v", loadErr)
+	}
+
+	// POST /daemon/connect must return 405 (method not found on mux).
+	client := &http.Client{}
+	for _, path := range []string{"/daemon/connect", "/daemon/disconnect"} {
+		req, _ := http.NewRequestWithContext(ctx, http.MethodPost,
+			fmt.Sprintf("http://127.0.0.1:%d%s", port, path), nil)
+		req.Header.Set("Authorization", "Bearer "+pidData.Token)
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("POST %s: %v", path, err)
+		}
+		_ = resp.Body.Close()
+		// ServeMux returns 404 for unregistered paths (or 405 for wrong method).
+		// Either way, the endpoint must NOT return 204 (which was the old behavior).
+		if resp.StatusCode == http.StatusNoContent {
+			t.Errorf("POST %s must not return 204 (endpoint removed), got %d", path, resp.StatusCode)
+		}
+	}
+
+	cancel()
+	select {
+	case serveErr := <-errCh:
+		if serveErr != nil {
+			t.Errorf("Serve: %v", serveErr)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Serve did not return")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Tests: DisableTokenAuth (v0.4.0 — replaces RequireToken with inverted default)
+// ---------------------------------------------------------------------------
+
+// TestServe_DisableTokenAuth_DefaultRequiresToken verifies that when
+// DisableTokenAuth is false (default), the application handler requires
+// a bearer token.
+func TestServe_DisableTokenAuth_DefaultRequiresToken(t *testing.T) {
+	dir := t.TempDir()
+	cfg := Config{
+		Name:    "auth-default",
+		DataDir: dir,
+		// DisableTokenAuth defaults to false = token required for app handler.
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	appHandler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(w, "ok")
+	})
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- Serve(ctx, cfg, appHandler) }()
+
+	store := newDefaultPIDStore(dir, "auth-default")
+	var port int
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		data, err := store.Load()
+		if err == nil && data.Port > 0 {
+			port = data.Port
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if port == 0 {
+		t.Fatal("PID file must be written within 5 seconds")
+	}
+
+	// App endpoint without token must be rejected (401).
+	appURL := fmt.Sprintf("http://127.0.0.1:%d/api/data", port)
+	resp, err := http.Get(appURL) //nolint:noctx,gosec // test-only
+	if err != nil {
+		t.Fatalf("GET /api/data: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("default DisableTokenAuth=false must require token for app, got %d", resp.StatusCode)
+	}
+
+	// Health endpoint must still be open (unauthenticated).
+	healthURL := fmt.Sprintf("http://127.0.0.1:%d/health", port)
+	resp, err = http.Get(healthURL) //nolint:noctx,gosec // test-only
+	if err != nil {
+		t.Fatalf("GET /health: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("health must be open, got %d", resp.StatusCode)
+	}
+
+	// App endpoint WITH token must succeed.
+	pidData, _ := store.Load()
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, appURL, nil)
+	req.Header.Set("Authorization", "Bearer "+pidData.Token)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET /api/data with token: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("app with token must return 200, got %d", resp.StatusCode)
+	}
+
+	cancel()
+	<-errCh
+}
+
+// TestServe_DisableTokenAuth_ExplicitTrue verifies that when DisableTokenAuth
+// is true, the application handler does NOT require a bearer token.
+func TestServe_DisableTokenAuth_ExplicitTrue(t *testing.T) {
+	dir := t.TempDir()
+	cfg := Config{
+		Name:             "auth-disabled",
+		DataDir:          dir,
+		DisableTokenAuth: true,
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	appHandler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(w, "ok")
+	})
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- Serve(ctx, cfg, appHandler) }()
+
+	store := newDefaultPIDStore(dir, "auth-disabled")
+	var port int
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		data, err := store.Load()
+		if err == nil && data.Port > 0 {
+			port = data.Port
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if port == 0 {
+		t.Fatal("PID file must be written within 5 seconds")
+	}
+
+	// App endpoint without token must succeed when DisableTokenAuth=true.
+	appURL := fmt.Sprintf("http://127.0.0.1:%d/api/data", port)
+	resp, err := http.Get(appURL) //nolint:noctx,gosec // test-only
+	if err != nil {
+		t.Fatalf("GET /api/data: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("DisableTokenAuth=true must allow app without token, got %d", resp.StatusCode)
+	}
+
+	cancel()
+	<-errCh
+}
+
+// ---------------------------------------------------------------------------
 // Tests: authGuard middleware
 // ---------------------------------------------------------------------------
 
@@ -448,7 +643,6 @@ func TestAuthGuard_DaemonEndpoints(t *testing.T) {
 		{"daemon path, wrong token", "/daemon/shutdown", "Bearer wrong-token", http.StatusUnauthorized},
 		{"daemon path, correct token", "/daemon/shutdown", "Bearer " + token, http.StatusOK},
 		{"daemon attach, correct token", "/daemon/attach", "Bearer " + token, http.StatusOK},
-		{"daemon connect, no token", "/daemon/connect", "", http.StatusUnauthorized},
 		{"health, no token", "/health", "", http.StatusOK},
 	}
 

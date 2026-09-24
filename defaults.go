@@ -55,8 +55,8 @@ func (a *pidStoreAdapter) Path() string {
 // defaultProcessManager delegates to internal platform-specific functions.
 type defaultProcessManager struct{}
 
-func (defaultProcessManager) StartDetached(binary string, args []string, logFile string, env []string) (int, error) {
-	return internal.StartDetached(binary, args, logFile, env)
+func (defaultProcessManager) Start(ctx context.Context, spec StartSpec) (int, error) {
+	return internal.StartProcess(ctx, spec.Binary, spec.Args, spec.Dir, spec.Env, spec.LogFile, spec.ExtraFiles)
 }
 
 func (defaultProcessManager) KillProcess(ctx context.Context, pid int, grace time.Duration) error {
@@ -74,8 +74,8 @@ func (defaultHealthChecker) Check(port int, healthPath string) error {
 	return internal.CheckHealth(port, healthPath)
 }
 
-func (defaultHealthChecker) WaitUntilReady(port int, healthPath string, timeout time.Duration) error {
-	return internal.WaitUntilReady(port, healthPath, timeout)
+func (defaultHealthChecker) WaitUntilReady(ctx context.Context, port int, healthPath string, timeout time.Duration) error {
+	return internal.WaitUntilReady(ctx, port, healthPath, timeout)
 }
 
 type healthResponse struct {

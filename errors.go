@@ -20,4 +20,15 @@ var (
 
 	// ErrInvalidConfig indicates the configuration is invalid.
 	ErrInvalidConfig = errors.New("daemon: invalid config")
+
+	// ErrStopIntent indicates the daemon was explicitly held via Hold() and
+	// EnsureRunning refuses to auto-start it. Use Release(), Start(), or
+	// Restart() to clear the hold and allow restarts.
+	ErrStopIntent = errors.New("daemon: held; use Release or Start to allow restarts")
+
+	// ErrSpawnCooldown indicates a recent spawn failure triggered a cooldown
+	// period. EnsureRunning returns this error instead of retrying immediately.
+	// The cooldown prevents rapid respawn loops when multiple agents call
+	// EnsureRunning after a failure.
+	ErrSpawnCooldown = errors.New("daemon: spawn cooldown active after recent failure")
 )

@@ -271,7 +271,7 @@ func TestDefaultHealthChecker_WaitUntilReady(t *testing.T) {
 	checker := defaultHealthChecker{}
 	port := extractServerPort(t, srv.URL)
 
-	err := checker.WaitUntilReady(port, "/health", 5*time.Second)
+	err := checker.WaitUntilReady(context.Background(), port, "/health", 5*time.Second)
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}

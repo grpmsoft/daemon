@@ -3,6 +3,7 @@
 package internal
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"time"
@@ -26,12 +27,17 @@ func CheckHealth(port int, healthPath string) error {
 	return nil
 }
 
-// WaitUntilReady polls the health endpoint every 500ms until it responds OK
-// or the timeout expires.
-func WaitUntilReady(port int, healthPath string, timeout time.Duration) error {
+// WaitUntilReady polls the health endpoint every 500ms until it responds OK,
+// the timeout expires, or ctx is cancelled.
+func WaitUntilReady(ctx context.Context, port int, healthPath string, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 
 	for time.Now().Before(deadline) {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
 		if err := CheckHealth(port, healthPath); err == nil {
 			return nil
 		}

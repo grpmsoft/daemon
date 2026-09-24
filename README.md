@@ -53,9 +53,13 @@ info, err = d.EnsureRunning(ctx)    // idempotent
 info, err = d.Restart(ctx)          // stop + start, one lock
 err = d.Stop(ctx)                   // graceful shutdown
 info, err = d.Status()              // read-only, no lock
+
+// Explicit autostart prevention:
+err = d.Hold(ctx)                   // stop + write .stop-intent marker
+d.Release()                         // clear marker, allow restarts
 ```
 
-All mutating methods serialize on a startup lock. Public methods never call other public methods. Config is immutable after `New()` -- concurrent calls are safe.
+All mutating methods serialize on a startup lock and an in-process mutex. Public methods never call other public methods. Config is immutable after `New()` -- concurrent calls are safe.
 
 ## Three Modes
 
@@ -130,23 +134,77 @@ Proxy process          Daemon
                      graceful shutdown
 ```
 
-Backward compatible: if the daemon predates leases (v0.3.0), the proxy falls back to explicit `POST /daemon/connect` and `POST /daemon/disconnect`.
+### Proxy Limitations
+
+- One request in flight (sequential dispatch, not pipelined)
+- No server-to-client notifications (unidirectional)
+- Not Streamable-HTTP/SSE compatible (plain JSON-RPC POST only)
+- Use direct HTTP connection for concurrent tool calls
+
+## Hold / Release
+
+`Stop()` shuts down the daemon but does **not** prevent `EnsureRunning` from starting it again. If you need the daemon to stay down -- for example, during a binary upgrade or manual debugging -- use `Hold()`:
+
+```go
+d := daemon.New(cfg)
+
+// Stop and block automatic restarts:
+err := d.Hold(ctx)  // writes .stop-intent marker
+
+// Any subsequent EnsureRunning returns ErrStopIntent:
+_, err = d.EnsureRunning(ctx) // err == daemon.ErrStopIntent
+
+// Allow restarts again:
+d.Release()                   // clears the marker
+// -- or --
+d.Start(ctx)                  // Start and Restart also clear the marker
+```
+
+The stop-intent marker is a file in `DataDir`. It survives process crashes. `Start()` and `Restart()` clear it implicitly -- an explicit start decision overrides a previous hold.
+
+## Spawn Cooldown
+
+When a spawn fails (binary not found, port conflict, health check timeout), `EnsureRunning` writes a cooldown marker. During the cooldown window, subsequent `EnsureRunning` calls return `ErrSpawnCooldown` immediately instead of retrying. This prevents rapid respawn loops when multiple MCP agents call `EnsureRunning` after a failure.
+
+```go
+cfg := daemon.Config{
+    Name:          "myapp",
+    DataDir:       ".myapp",
+    SpawnCooldown: 10 * time.Second, // default: 5s, -1 to disable
+}
+
+d := daemon.New(cfg)
+_, err := d.EnsureRunning(ctx) // spawn fails
+_, err = d.EnsureRunning(ctx)  // err == daemon.ErrSpawnCooldown (within 10s)
+```
+
+The cooldown marker is time-based: it expires after `SpawnCooldown` elapses. A successful `Start()` or `Restart()` clears it. Context cancellation skips the cooldown check.
+
+## Shutdown Timeout
+
+`Config.ShutdownTimeout` (default `10s`) is the daemon's graceful drain budget. `Serve()` passes it to `http.Server.Shutdown`. On the client side, `Stop()` sends a shutdown request (fixed 2s timeout), waits `ShutdownTimeout + 2s` for the daemon to release the PID lock, then escalates to kill with a fixed 3s grace. Worst case: `ShutdownTimeout + 7s`.
+
+```go
+cfg := daemon.Config{
+    Name:            "myapp",
+    DataDir:         ".myapp",
+    ShutdownTimeout: 15 * time.Second, // default: 10s
+}
+```
 
 ## Security
 
-`Serve()` generates a bearer token (`crypto/rand`) at startup and stores it in the PID file (`0600` permissions). All `/daemon/*` control-plane endpoints require `Authorization: Bearer <token>`. The `/health` endpoint stays open for external probes.
+`Serve()` generates a bearer token (`crypto/rand`) at startup and stores it in the PID file (`0600` permissions). All `/daemon/*` control-plane endpoints require `Authorization: Bearer <token>`. The `/health` endpoint stays open for external probes. The application handler (everything outside `/health` and `/daemon/*`) also requires the token by default (secure by default since v0.4.0).
 
 | Method | Path | Auth | Purpose |
 |--------|------|------|---------|
 | `GET` | `/health` | None | Readiness probe |
-| `GET` | `/daemon/attach` | Bearer | Lease connection (v0.3.1+) |
-| `POST` | `/daemon/connect` | Bearer | Increment connection count. Deprecated: use attach |
-| `POST` | `/daemon/disconnect` | Bearer | Decrement connection count. Deprecated: use attach |
+| `GET` | `/daemon/attach` | Bearer | Lease connection |
 | `POST` | `/daemon/shutdown` | Bearer | Graceful stop |
 
 DNS rebinding protection: `loopbackGuard` middleware rejects requests with non-loopback `Host` or `Origin` headers. Combined with the bearer token, a page with a rebinding domain that passes the Host check still cannot authenticate.
 
-Set `Config.RequireToken = true` to extend token auth to your application handler (everything outside `/health` and `/daemon/*`).
+Set `Config.DisableTokenAuth = true` to skip token auth for the application handler (e.g., for local curl debugging).
 
 ## Configuration
 
@@ -160,7 +218,9 @@ Set `Config.RequireToken = true` to extend token auth to your application handle
 | `Timeout` | `time.Duration` | `30s` | How long `Start()` waits for health check |
 | `HealthPath` | `string` | `"/health"` | HTTP path for the health endpoint |
 | `IdleTimeout` | `time.Duration` | `0` (disabled) | Auto-shutdown after this duration with zero connections |
-| `RequireToken` | `bool` | `false` | Extend bearer token auth to the application handler |
+| `DisableTokenAuth` | `bool` | `false` | Skip bearer token auth for the application handler |
+| `SpawnCooldown` | `time.Duration` | `5s` | Cooldown after spawn failure; `-1` to disable |
+| `ShutdownTimeout` | `time.Duration` | `10s` | Daemon graceful drain budget; `Stop()` worst case is `ShutdownTimeout + 7s` |
 
 Config is normalized at construction time (`New()`). Set `Binary` and `Args` once; all lifecycle methods use them automatically.
 
