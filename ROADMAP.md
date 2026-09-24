@@ -1,25 +1,31 @@
 # Roadmap
 
-## Current State: v0.3.3
+## Current State: v0.4.0
 
 Cross-platform daemon lifecycle library with unified lock protocol,
-lease-based connection tracking, and control-plane bearer token.
+lease-based connection tracking, control-plane bearer token, stop-intent,
+and spawn cooldown.
 
 ### What works
 
-- Client mode: Start/Stop/Restart/Status — all serialized on startup lock
-- Server mode: Serve with auto port, inherited-lock PID file, health endpoint
+- Client mode: Start/Stop/Restart/Status — all serialized on startup lock + in-process mutex
+- Server mode: Serve with auto port, inherited-lock PID file, health endpoint, configurable ShutdownTimeout
 - Proxy mode: stdin/stdout ↔ HTTP bridge with IsHeld pre-check
 - EnsureRunning: method on *Daemon + package-level wrapper, fully testable
 - Binary/Args in Config — daemon identity per-config, not per-call
 - All mutating methods return *Info (pid, port, start time)
 - Graceful stop: HTTP /daemon/shutdown → clean exit on all platforms
-- Lease-based connection tracking: GET /daemon/attach — TCP lease, crash-safe- Bearer token on /daemon/* endpoints — PID file 0600 as auth boundary- Backward compat: connect/disconnect still work, token optional for old daemons
+- Lease-based connection tracking: GET /daemon/attach — TCP lease, crash-safe
+- Bearer token on /daemon/* endpoints — PID file 0600 as auth boundary
+- Secure by default: token required for app handler (DisableTokenAuth to opt out)
+- Hold/Release: explicit stop-intent marker prevents EnsureRunning auto-start
+- SpawnCooldown: prevents rapid respawn loops after spawn failure (default 5s)
+- StateNew connection drain: pre-dialed connections closed before Shutdown
 - Orphan child killed on start failure
 - Cross-platform: Windows (share-mode), Linux/macOS (flock), BSD (flock)
 - CI: Node 24 actions, Dependabot
 
-## v0.4.0 — Hardening
+## v0.5.0 — Hardening
 
 - [ ] `slog.Logger` in Config (replace `fmt.Fprintf(os.Stderr)`)
 - [ ] Pipe handshake parent→child (JSON, replaces env vars)

@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-09-25
+
+### Breaking Changes
+
+- **`POST /daemon/connect` and `POST /daemon/disconnect` REMOVED** — use `GET /daemon/attach` (lease-based connection tracking). These endpoints were deprecated in v0.3.1 and kept for backward compatibility. They are now fully removed along with the Proxy fallback path that used them
+- **`ProcessManager.Start(ctx, StartSpec)` replaces `StartDetached(binary, args, logFile, env)`** — the new `StartSpec` struct consolidates all spawn parameters: `Binary`, `Args`, `Dir`, `Env`, `LogFile`, `ExtraFiles`. Consumers implementing `ProcessManager` must update their method signature
+- **`Config.DisableTokenAuth` replaces `Config.RequireToken`** — inverted default: zero value (`false`) means token IS required (secure by default). Migration: `RequireToken: true` → remove the field entirely. `RequireToken: false` → set `DisableTokenAuth: true`
+- **`HealthChecker.WaitUntilReady(ctx, port, healthPath, timeout)`** — `ctx context.Context` parameter added as the first argument. Consumers implementing `HealthChecker` must update their method signature
+- **`Config.ShutdownTimeout`** (`time.Duration`, default `10s`) replaces hardcoded 5s/10s drain delays — `Serve` uses this for HTTP server drain; `Stop` client waits `ShutdownTimeout` plus margin then falls back to kill. The budget is split across phases: HTTP shutdown request (half), lock release wait (full), kill grace (half)
+
+### Added
+
+- **`Hold(ctx context.Context) error`** — stops the daemon AND writes a `.stop-intent` marker file. While the marker exists, `EnsureRunning` returns `ErrStopIntent` instead of auto-starting. Use `Release()`, `Start()`, or `Restart()` to clear the marker and allow restarts. Default `Stop()` does NOT write the marker — hold is opt-in
+- **`Release()`** — clears the `.stop-intent` marker, allowing `EnsureRunning` to restart the daemon. No-op if no marker exists
+- **`ErrStopIntent`** — sentinel error returned by `EnsureRunning` when the daemon is held via `Hold()`
+- **`Config.SpawnCooldown`** (`time.Duration`, default `5s`, `-1` to disable) — after a spawn failure, a `.spawn-cooldown` marker prevents rapid retry. `EnsureRunning` returns `ErrSpawnCooldown` during the cooldown window. Protects against respawn storms when multiple MCP agents call `EnsureRunning` after a failure. Cooldown is skipped on context cancellation
+- **`ErrSpawnCooldown`** — sentinel error returned by `EnsureRunning` during the cooldown period after a spawn failure
+- **`sync.Mutex` on `*Daemon`** — in-process serialization complements the file lock. Satisfies the race detector when multiple goroutines call lifecycle methods on the same `*Daemon` instance
+
+### Fixed
+
+- **StateNew connection drain** — `ConnState` callback tracks pre-dialed connections in `StateNew`. Before `Shutdown`, these connections are closed explicitly, eliminating the 5-second stdlib drain delay that occurred under `-race` and connection pooling
+- **EnsureRunning check order** — fixed to: (1) IsHeld → return existing daemon, (2) stop-intent → `ErrStopIntent`, (3) cooldown → `ErrSpawnCooldown`, (4) start. A running daemon is returned even if a stale stop-intent or cooldown marker exists
+
 ## [0.3.3] - 2026-09-12
 
 ### Added
@@ -178,6 +202,7 @@ A v0.3.0 proxy cannot authenticate with a v0.3.1 daemon. Upgrade both simultaneo
 - CI: GitHub Actions (build/test/lint/fmt on 3 OS, codecov OIDC)
 - Docs: README, CONTRIBUTING, SECURITY, CODE_OF_CONDUCT, AGENTS, llms.txt
 
+[0.4.0]: https://github.com/grpmsoft/daemon/compare/v0.3.3...v0.4.0
 [0.3.3]: https://github.com/grpmsoft/daemon/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/grpmsoft/daemon/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/grpmsoft/daemon/compare/v0.3.0...v0.3.1
