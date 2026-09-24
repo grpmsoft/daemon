@@ -204,6 +204,16 @@ The two libraries are complementary: if your tool must be present from boot, run
 
 Contributions welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines and [CHANGELOG.md](CHANGELOG.md) for release history.
 
+## Star History
+
+<a href="https://starhistory.io">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.starhistory.io/png?repos=grpmsoft/daemon&style=dark" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.starhistory.io/png?repos=grpmsoft/daemon&style=professional" />
+   <img alt="Star History Chart" src="https://api.starhistory.io/png?repos=grpmsoft/daemon" width="800" />
+ </picture>
+</a>
+
 ## License
 
 MIT License. See [LICENSE](LICENSE).
