@@ -466,11 +466,12 @@ func TestServe_ConnectEndpointRemoved(t *testing.T) {
 	}
 
 	// POST /daemon/connect must return 405 (method not found on mux).
+	client := &http.Client{}
 	for _, path := range []string{"/daemon/connect", "/daemon/disconnect"} {
 		req, _ := http.NewRequestWithContext(ctx, http.MethodPost,
 			fmt.Sprintf("http://127.0.0.1:%d%s", port, path), nil)
 		req.Header.Set("Authorization", "Bearer "+pidData.Token)
-		resp, err := http.DefaultClient.Do(req)
+		resp, err := client.Do(req)
 		if err != nil {
 			t.Fatalf("POST %s: %v", path, err)
 		}

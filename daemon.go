@@ -35,6 +35,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -121,11 +122,6 @@ func (d *Daemon) EnsureRunning(ctx context.Context) (*Info, error) {
 	}
 	defer internal.Unlock(startupFile)
 
-	// Stop-intent: refuse to auto-start if the user explicitly stopped.
-	if hasStopIntent(d.cfg.DataDir, d.cfg.Name) {
-		return nil, ErrStopIntent
-	}
-
 	pidPath := d.pids.Path()
 	if pidlock.IsHeld(pidPath) {
 		// Daemon already running — wait for port and return existing info.
@@ -142,6 +138,13 @@ func (d *Daemon) EnsureRunning(ctx context.Context) (*Info, error) {
 			return d.buildInfo(data), nil
 		}
 		// Daemon died while waiting — fall through to start.
+	}
+
+	// Stop-intent: refuse to auto-start if the user called Hold().
+	// Checked AFTER IsHeld so a running daemon (e.g. foreground `serve`) is
+	// returned even if a stale stop-intent marker exists.
+	if hasStopIntent(d.cfg.DataDir, d.cfg.Name) {
+		return nil, ErrStopIntent
 	}
 
 	// Spawn cooldown: refuse rapid retry after a recent spawn failure.
@@ -181,7 +184,11 @@ func (d *Daemon) startLocked(ctx context.Context) (*Info, error) {
 	_, startErr := d.startWithLock(ctx, lock)
 	if startErr != nil {
 		_ = lock.File().Close()
-		_ = writeCooldown(d.cfg.DataDir, d.cfg.Name)
+		// Skip cooldown on context cancellation — Ctrl-C by one agent must not
+		// penalize other agents with ErrSpawnCooldown.
+		if !errors.Is(startErr, context.Canceled) && !errors.Is(startErr, context.DeadlineExceeded) {
+			_ = writeCooldown(d.cfg.DataDir, d.cfg.Name)
+		}
 		return nil, fmt.Errorf("start %s: %w", d.cfg.Name, startErr)
 	}
 
@@ -212,10 +219,12 @@ func (d *Daemon) stopLocked(ctx context.Context) error {
 	}
 
 	// Try graceful shutdown via HTTP first.
-	httpTimeout := d.cfg.ShutdownTimeout / 2
+	// Budget: 2s for HTTP signal + ShutdownTimeout+2s for daemon drain + 3s kill.
+	// Worst case: ShutdownTimeout + 7s. Correct: daemon actually drains.
+	const httpSignalTimeout = 2 * time.Second
 	if data.Port > 0 {
 		shutdownURL := fmt.Sprintf("http://127.0.0.1:%d/daemon/shutdown", data.Port)
-		reqCtx, cancel := context.WithTimeout(ctx, httpTimeout)
+		reqCtx, cancel := context.WithTimeout(ctx, httpSignalTimeout)
 		req, reqErr := http.NewRequestWithContext(reqCtx, http.MethodPost, shutdownURL, nil)
 		if reqErr == nil {
 			// Send bearer token if available (v0.3.1+ daemon requires it).
@@ -227,7 +236,9 @@ func (d *Daemon) stopLocked(ctx context.Context) error {
 			cancel()
 			if doErr == nil {
 				_ = resp.Body.Close()
-				if waitErr := waitForLockRelease(ctx, d.pids, d.cfg.ShutdownTimeout); waitErr == nil {
+				// Wait for daemon to drain: ShutdownTimeout (daemon's own drain budget) + 2s margin.
+				waitTimeout := d.cfg.ShutdownTimeout + 2*time.Second
+				if waitErr := waitForLockRelease(ctx, d.pids, waitTimeout); waitErr == nil {
 					return nil
 				} else if ctx.Err() != nil {
 					return ctx.Err()
@@ -240,8 +251,8 @@ func (d *Daemon) stopLocked(ctx context.Context) error {
 		}
 	}
 
-	// Fallback: force kill.
-	killGrace := d.cfg.ShutdownTimeout / 2
+	// Fallback: force kill with a fixed short grace period.
+	const killGrace = 3 * time.Second
 	if err := d.procs.KillProcess(ctx, data.PID, killGrace); err != nil {
 		return fmt.Errorf("kill daemon %s (pid %d): %w", d.cfg.Name, data.PID, err)
 	}
@@ -355,9 +366,8 @@ func readLogTail(logFile string, n int) string {
 // Stop gracefully shuts down the daemon. Serialized on the startup lock.
 // Idempotent: returns nil if the daemon is already stopped.
 //
-// On success, writes a stop-intent marker so that EnsureRunning will
-// not auto-restart the daemon. Use Start() or Restart() to clear the
-// marker and explicitly restart.
+// Stop does NOT prevent EnsureRunning from restarting the daemon. Use
+// Hold() to stop the daemon AND block automatic restarts.
 func (d *Daemon) Stop(ctx context.Context) error {
 	if err := d.cfg.Validate(); err != nil {
 		return err
@@ -368,11 +378,30 @@ func (d *Daemon) Stop(ctx context.Context) error {
 	}
 	defer internal.Unlock(startupFile)
 
-	stopErr := d.stopLocked(ctx)
-	if stopErr == nil {
-		_ = writeStopIntent(d.cfg.DataDir, d.cfg.Name)
+	return d.stopLocked(ctx)
+}
+
+// Hold stops the daemon and writes a stop-intent marker that prevents
+// EnsureRunning from restarting it. Use Release() or Start() to clear
+// the marker and allow restarts again.
+func (d *Daemon) Hold(ctx context.Context) error {
+	if err := d.cfg.Validate(); err != nil {
+		return err
 	}
-	return stopErr
+	startupFile, err := d.acquireStartupLock(ctx)
+	if err != nil {
+		return fmt.Errorf("hold %s: %w", d.cfg.Name, err)
+	}
+	defer internal.Unlock(startupFile)
+
+	_ = d.stopLocked(ctx)
+	return writeStopIntent(d.cfg.DataDir, d.cfg.Name)
+}
+
+// Release clears the stop-intent marker, allowing EnsureRunning to
+// restart the daemon. It is a no-op if no marker exists.
+func (d *Daemon) Release() {
+	clearStopIntent(d.cfg.DataDir, d.cfg.Name)
 }
 
 // Restart stops a running daemon (if any) and starts a new one, under a
@@ -554,6 +583,24 @@ func Serve(ctx context.Context, cfg Config, handler http.Handler) error {
 	defer serveCancel()
 
 	mux := buildDaemonMux(cfg, ct, shutdownCh, handler, startTime)
+
+	// Track StateNew connections so they can be closed before Shutdown.
+	// net/http.Server.Shutdown waits up to 5s for StateNew connections
+	// (Go stdlib behavior). Pre-dialed pooled connections sit in StateNew
+	// and cause unnecessary delays under -race and connection pooling.
+	var (
+		connMu   sync.Mutex
+		newConns = make(map[net.Conn]struct{})
+	)
+	closeNewConns := func() {
+		connMu.Lock()
+		defer connMu.Unlock()
+		for conn := range newConns {
+			_ = conn.Close()
+		}
+		clear(newConns)
+	}
+
 	server := &http.Server{
 		Handler:           loopbackGuard(authGuard(mux, token, !cfg.DisableTokenAuth, cfg.HealthPath), port),
 		ReadHeaderTimeout: 10 * time.Second,
@@ -561,9 +608,18 @@ func Serve(ctx context.Context, cfg Config, handler http.Handler) error {
 		// serveCancel is called in the HTTP server's interrupt before Shutdown,
 		// which cancels all in-flight request contexts (unblocking /daemon/attach).
 		BaseContext: func(_ net.Listener) context.Context { return serveCtx },
+		ConnState: func(conn net.Conn, state http.ConnState) {
+			connMu.Lock()
+			defer connMu.Unlock()
+			if state == http.StateNew {
+				newConns[conn] = struct{}{}
+			} else {
+				delete(newConns, conn)
+			}
+		},
 	}
 
-	return runServeGroup(server, ln, shutdownCh, ct, cfg.IdleTimeout, serveCancel)
+	return runServeGroup(server, ln, shutdownCh, ct, cfg.IdleTimeout, cfg.ShutdownTimeout, closeNewConns, serveCancel)
 }
 
 // runServeGroup sets up the actor group (HTTP server, signal handler, shutdown
@@ -572,7 +628,7 @@ func Serve(ctx context.Context, cfg Config, handler http.Handler) error {
 //
 // cancelBase is called before server.Shutdown to cancel the BaseContext,
 // unblocking long-lived handlers like /daemon/attach.
-func runServeGroup(server *http.Server, ln net.Listener, shutdownCh chan struct{}, ct *ConnTracker, idleTimeout time.Duration, cancelBase context.CancelFunc) error {
+func runServeGroup(server *http.Server, ln net.Listener, shutdownCh chan struct{}, ct *ConnTracker, idleTimeout, shutdownTimeout time.Duration, closeNewConns func(), cancelBase context.CancelFunc) error {
 	// Use the server's BaseContext (serveCtx) for signal notifications.
 	sigCtx, sigStop := signal.NotifyContext(server.BaseContext(ln), syscall.SIGINT, syscall.SIGTERM)
 
@@ -590,7 +646,10 @@ func runServeGroup(server *http.Server, ln net.Listener, shutdownCh chan struct{
 			// Cancel the base context first — this cancels all in-flight request
 			// contexts, unblocking long-lived handlers like /daemon/attach.
 			cancelBase()
-			shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+			// Close pre-dialed StateNew connections that would otherwise cause
+			// Shutdown to wait up to 5s (Go net/http stdlib behavior).
+			closeNewConns()
+			shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), shutdownTimeout)
 			defer shutdownCancel()
 			if shutErr := server.Shutdown(shutdownCtx); shutErr != nil {
 				fmt.Fprintf(os.Stderr, "[daemon] server shutdown: %v\n", shutErr)

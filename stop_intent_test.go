@@ -3,6 +3,8 @@ package daemon
 import (
 	"context"
 	"errors"
+	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -166,7 +168,7 @@ func TestStopIntent_BlocksEnsureRunning(t *testing.T) {
 		HealthPath: "/health",
 	}, pids, procs, health)
 
-	// Write the stop-intent marker (simulating a prior Stop).
+	// Write the stop-intent marker (simulating a prior Hold).
 	if err := writeStopIntent(dataDir, "testapp"); err != nil {
 		t.Fatalf("writeStopIntent: %v", err)
 	}
@@ -257,7 +259,7 @@ func TestStopIntent_ClearedByRestart(t *testing.T) {
 	}
 }
 
-func TestStopIntent_StopWritesMarker(t *testing.T) {
+func TestStopIntent_StopDoesNotWriteMarker(t *testing.T) {
 	dataDir := t.TempDir()
 	pidPath := filepath.Join(dataDir, "testapp.pid")
 
@@ -282,15 +284,14 @@ func TestStopIntent_StopWritesMarker(t *testing.T) {
 	}
 
 	// Stop on already-stopped daemon is idempotent (returns nil).
-	// stopLocked returns nil when no PID file exists.
 	err := d.Stop(context.Background())
 	if err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
 
-	// Marker must be created because stopLocked returned nil.
-	if !hasStopIntent(dataDir, "testapp") {
-		t.Error("Stop must write the stop-intent marker on success")
+	// Stop must NOT write marker (K1 fix: stop-intent is opt-in via Hold).
+	if hasStopIntent(dataDir, "testapp") {
+		t.Error("Stop must NOT write the stop-intent marker; use Hold instead")
 	}
 }
 
@@ -313,19 +314,19 @@ func TestStopIntent_IdempotentDoubleStop(t *testing.T) {
 		HealthPath: "/health",
 	}, pids, procs, health)
 
-	// Stop twice — both must succeed, marker must be present after each.
+	// Stop twice — both must succeed, no marker written.
 	if err := d.Stop(context.Background()); err != nil {
 		t.Fatalf("first Stop: %v", err)
 	}
-	if !hasStopIntent(dataDir, "testapp") {
-		t.Error("marker must exist after first Stop")
+	if hasStopIntent(dataDir, "testapp") {
+		t.Error("Stop must not write marker")
 	}
 
 	if err := d.Stop(context.Background()); err != nil {
 		t.Fatalf("second Stop: %v", err)
 	}
-	if !hasStopIntent(dataDir, "testapp") {
-		t.Error("marker must exist after second Stop")
+	if hasStopIntent(dataDir, "testapp") {
+		t.Error("Stop must not write marker on second call either")
 	}
 }
 
@@ -363,8 +364,8 @@ func TestStopIntent_NoMarkerWhenStopFails(t *testing.T) {
 	}
 }
 
-func TestStopIntent_FullCycle_StopBlocksEnsure_StartResumes(t *testing.T) {
-	// End-to-end cycle: Start → Stop → EnsureRunning (blocked) → Start (clears) → EnsureRunning (ok).
+func TestStopIntent_FullCycle_HoldBlocksEnsure_StartResumes(t *testing.T) {
+	// End-to-end cycle: Hold → EnsureRunning (blocked) → Start (clears) → EnsureRunning (ok).
 	dataDir := t.TempDir()
 	pidPath := filepath.Join(dataDir, "testapp.pid")
 
@@ -384,15 +385,18 @@ func TestStopIntent_FullCycle_StopBlocksEnsure_StartResumes(t *testing.T) {
 		HealthPath: "/health",
 	}, pids, procs, health)
 
-	// Step 1: Stop (idempotent on non-running) — writes marker.
-	if err := d.Stop(context.Background()); err != nil {
-		t.Fatalf("Stop: %v", err)
+	// Step 1: Hold (stops + writes marker).
+	if err := d.Hold(context.Background()); err != nil {
+		t.Fatalf("Hold: %v", err)
+	}
+	if !hasStopIntent(dataDir, "testapp") {
+		t.Fatal("Hold must write stop-intent marker")
 	}
 
 	// Step 2: EnsureRunning — must fail with ErrStopIntent.
 	_, err := d.EnsureRunning(context.Background())
 	if !errors.Is(err, ErrStopIntent) {
-		t.Fatalf("EnsureRunning after Stop: expected ErrStopIntent, got: %v", err)
+		t.Fatalf("EnsureRunning after Hold: expected ErrStopIntent, got: %v", err)
 	}
 
 	// Step 3: Start — clears marker (exec will fail, that's ok).
@@ -404,4 +408,216 @@ func TestStopIntent_FullCycle_StopBlocksEnsure_StartResumes(t *testing.T) {
 		t.Fatal("EnsureRunning after Start must not return ErrStopIntent")
 	}
 	// The error should be from exec (non-existent binary), not from stop-intent.
+}
+
+// TestHold_WritesMarker verifies that Hold() stops the daemon AND writes the
+// stop-intent marker.
+func TestHold_WritesMarker(t *testing.T) {
+	dataDir := t.TempDir()
+	pidPath := filepath.Join(dataDir, "testapp.pid")
+
+	pids := &pidStoreMock{
+		loadErr:     errors.New("pid file not found"),
+		aliveResult: false,
+		pathResult:  pidPath,
+	}
+	procs := &mockProcessManager{aliveResult: false}
+	health := &mockHealthChecker{}
+
+	d := NewWithDeps(Config{
+		Name:       "testapp",
+		DataDir:    dataDir,
+		Timeout:    100 * time.Millisecond,
+		HealthPath: "/health",
+	}, pids, procs, health)
+
+	if hasStopIntent(dataDir, "testapp") {
+		t.Fatal("marker must not exist before Hold")
+	}
+
+	err := d.Hold(context.Background())
+	if err != nil {
+		t.Fatalf("Hold: %v", err)
+	}
+
+	if !hasStopIntent(dataDir, "testapp") {
+		t.Error("Hold must write the stop-intent marker")
+	}
+}
+
+// TestHold_BlocksEnsureRunning verifies that after Hold(), EnsureRunning
+// returns ErrStopIntent.
+func TestHold_BlocksEnsureRunning(t *testing.T) {
+	dataDir := t.TempDir()
+	pidPath := filepath.Join(dataDir, "testapp.pid")
+
+	pids := &pidStoreMock{
+		loadErr:     errors.New("pid file not found"),
+		aliveResult: false,
+		pathResult:  pidPath,
+	}
+	procs := &mockProcessManager{aliveResult: false}
+	health := &mockHealthChecker{}
+
+	d := NewWithDeps(Config{
+		Name:       "testapp",
+		DataDir:    dataDir,
+		Binary:     "/nonexistent/binary",
+		Timeout:    500 * time.Millisecond,
+		HealthPath: "/health",
+	}, pids, procs, health)
+
+	if err := d.Hold(context.Background()); err != nil {
+		t.Fatalf("Hold: %v", err)
+	}
+
+	_, err := d.EnsureRunning(context.Background())
+	if !errors.Is(err, ErrStopIntent) {
+		t.Fatalf("EnsureRunning after Hold: expected ErrStopIntent, got: %v", err)
+	}
+}
+
+// TestRelease_ClearsMarker verifies that Release() clears the stop-intent
+// marker so EnsureRunning can proceed.
+func TestRelease_ClearsMarker(t *testing.T) {
+	dataDir := t.TempDir()
+	pidPath := filepath.Join(dataDir, "testapp.pid")
+
+	pids := &pidStoreMock{
+		loadErr:     errors.New("pid file not found"),
+		aliveResult: false,
+		pathResult:  pidPath,
+	}
+	procs := &mockProcessManager{aliveResult: false}
+	health := &mockHealthChecker{}
+
+	d := NewWithDeps(Config{
+		Name:       "testapp",
+		DataDir:    dataDir,
+		Binary:     "/nonexistent/binary",
+		Timeout:    500 * time.Millisecond,
+		HealthPath: "/health",
+	}, pids, procs, health)
+
+	// Hold writes marker.
+	if err := d.Hold(context.Background()); err != nil {
+		t.Fatalf("Hold: %v", err)
+	}
+	if !hasStopIntent(dataDir, "testapp") {
+		t.Fatal("marker must exist after Hold")
+	}
+
+	// Release clears marker.
+	d.Release()
+	if hasStopIntent(dataDir, "testapp") {
+		t.Error("Release must clear the stop-intent marker")
+	}
+
+	// EnsureRunning should not return ErrStopIntent anymore.
+	_, err := d.EnsureRunning(context.Background())
+	if errors.Is(err, ErrStopIntent) {
+		t.Fatal("EnsureRunning after Release must not return ErrStopIntent")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// H1: Integration test — EnsureRunning → Stop → EnsureRunning (no ErrStopIntent)
+// ---------------------------------------------------------------------------
+
+// TestHelperStopIntent is the daemon child process for stop-intent integration tests.
+func TestHelperStopIntent(t *testing.T) {
+	if os.Getenv("DAEMON_MODE") != "1" {
+		t.Skip("helper process only")
+	}
+	cfg := Config{Name: "sitest", DataDir: os.Getenv("DAEMON_DATA_DIR")}
+	if err := Serve(context.Background(), cfg, nil); err != nil {
+		fmt.Fprintln(os.Stderr, "stop-intent helper serve:", err)
+		os.Exit(1)
+	}
+	os.Exit(0)
+}
+
+// TestH1_EnsureRunning_Stop_EnsureRunning is the most important scenario:
+//  1. EnsureRunning → daemon starts, returns info
+//  2. Stop → daemon stops
+//  3. EnsureRunning → daemon restarts (NO ErrStopIntent!)
+//
+// This MUST work without Hold(). Stop alone must not prevent restarts.
+func TestH1_EnsureRunning_Stop_EnsureRunning(t *testing.T) {
+	dir := t.TempDir()
+	cfg := Config{
+		Name:    "sitest",
+		DataDir: dir,
+		Binary:  os.Args[0],
+		Args:    []string{"-test.run=^TestHelperStopIntent$", "-test.timeout=5m"},
+		Timeout: 15 * time.Second,
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		_ = New(cfg).Stop(ctx)
+	})
+
+	d := New(cfg)
+
+	// Step 1: EnsureRunning → starts daemon.
+	info, err := d.EnsureRunning(context.Background())
+	if err != nil {
+		t.Fatalf("first EnsureRunning: %v", err)
+	}
+	if info.Port == 0 {
+		t.Fatal("first EnsureRunning must return non-zero port")
+	}
+	firstPort := info.Port
+
+	// Verify daemon is alive.
+	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/health", firstPort)) //nolint:noctx,gosec // test-only
+	if err != nil {
+		t.Fatalf("health check on first daemon: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("health status = %d, want 200", resp.StatusCode)
+	}
+
+	// Step 2: Stop → daemon stops. No marker written.
+	if err := d.Stop(context.Background()); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+
+	// Verify no stop-intent marker.
+	if hasStopIntent(dir, "sitest") {
+		t.Fatal("Stop must NOT write stop-intent marker")
+	}
+
+	// Wait for daemon to actually stop.
+	deadline := time.Now().Add(10 * time.Second)
+	for d.IsRunning() && time.Now().Before(deadline) {
+		time.Sleep(100 * time.Millisecond)
+	}
+	if d.IsRunning() {
+		t.Fatal("daemon did not stop within 10s")
+	}
+
+	// Step 3: EnsureRunning → daemon RESTARTS (no ErrStopIntent).
+	info2, err := d.EnsureRunning(context.Background())
+	if err != nil {
+		if errors.Is(err, ErrStopIntent) {
+			t.Fatal("EnsureRunning after Stop returned ErrStopIntent — this is the K1 bug")
+		}
+		t.Fatalf("second EnsureRunning: %v", err)
+	}
+	if info2.Port == 0 {
+		t.Fatal("second EnsureRunning must return non-zero port")
+	}
+
+	// Verify second daemon is alive.
+	resp2, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/health", info2.Port)) //nolint:noctx,gosec // test-only
+	if err != nil {
+		t.Fatalf("health check on second daemon: %v", err)
+	}
+	_ = resp2.Body.Close()
+	if resp2.StatusCode != http.StatusOK {
+		t.Fatalf("second daemon health status = %d, want 200", resp2.StatusCode)
+	}
 }

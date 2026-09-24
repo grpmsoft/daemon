@@ -2,6 +2,7 @@ package internal
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -201,7 +202,7 @@ func TestWaitUntilReady(t *testing.T) {
 		if waitErr == nil {
 			t.Fatal("expected error from cancelled context")
 		}
-		if waitErr != context.Canceled {
+		if !errors.Is(waitErr, context.Canceled) {
 			t.Errorf("expected context.Canceled, got: %v", waitErr)
 		}
 		// Must return quickly, not wait 10s.

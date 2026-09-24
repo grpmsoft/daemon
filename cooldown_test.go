@@ -404,6 +404,76 @@ func TestSpawnCooldown_WrittenOnStartFailure(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// F2: cooldown NOT written on context cancellation
+// ---------------------------------------------------------------------------
+
+func TestSpawnCooldown_NotWrittenOnCtxCancel(t *testing.T) {
+	dir := t.TempDir()
+	pidPath := filepath.Join(dir, "cdtest.pid")
+
+	// Mock that returns context.Canceled from Start (simulating Ctrl-C during spawn).
+	pids := &pidStoreMock{pathResult: pidPath}
+	procs := &mockProcessManager{
+		startErr: context.Canceled,
+	}
+	health := &mockHealthChecker{}
+
+	d := NewWithDeps(Config{
+		Name:          "cdtest",
+		DataDir:       dir,
+		Binary:        "/nonexistent/binary",
+		Timeout:       200 * time.Millisecond,
+		HealthPath:    "/health",
+		SpawnCooldown: 5 * time.Second,
+	}, pids, procs, health)
+
+	_, err := d.Start(context.Background())
+	if err == nil {
+		t.Fatal("expected error from cancelled spawn")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled in chain, got: %v", err)
+	}
+
+	// Cooldown marker must NOT be written on context cancellation.
+	path := cooldownPath(dir, "cdtest")
+	if _, statErr := os.Stat(path); statErr == nil {
+		t.Error("cooldown file must NOT be written when start fails due to context cancellation")
+	}
+}
+
+func TestSpawnCooldown_NotWrittenOnDeadlineExceeded(t *testing.T) {
+	dir := t.TempDir()
+	pidPath := filepath.Join(dir, "cdtest.pid")
+
+	pids := &pidStoreMock{pathResult: pidPath}
+	procs := &mockProcessManager{
+		startErr: context.DeadlineExceeded,
+	}
+	health := &mockHealthChecker{}
+
+	d := NewWithDeps(Config{
+		Name:          "cdtest",
+		DataDir:       dir,
+		Binary:        "/nonexistent/binary",
+		Timeout:       200 * time.Millisecond,
+		HealthPath:    "/health",
+		SpawnCooldown: 5 * time.Second,
+	}, pids, procs, health)
+
+	_, err := d.Start(context.Background())
+	if err == nil {
+		t.Fatal("expected error from deadline exceeded spawn")
+	}
+
+	// Cooldown marker must NOT be written on deadline exceeded.
+	path := cooldownPath(dir, "cdtest")
+	if _, statErr := os.Stat(path); statErr == nil {
+		t.Error("cooldown file must NOT be written when start fails due to deadline exceeded")
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Full round-trip: start -> health check -> EnsureRunning -> verify
 // ---------------------------------------------------------------------------
 

@@ -1111,8 +1111,8 @@ func TestDaemon_BuildInfo_ZeroStartTime_ZeroUptime(t *testing.T) {
 // Tests: ShutdownTimeout
 // ---------------------------------------------------------------------------
 
-// TestShutdownTimeout_UsedInStop verifies that stopLocked passes configured
-// ShutdownTimeout fractions to KillProcess instead of hardcoded 5s.
+// TestShutdownTimeout_UsedInStop verifies that stopLocked uses a fixed 3s
+// kill grace (K2 fix: kill grace is independent of ShutdownTimeout).
 func TestShutdownTimeout_UsedInStop(t *testing.T) {
 	dataDir := t.TempDir()
 
@@ -1131,11 +1131,10 @@ func TestShutdownTimeout_UsedInStop(t *testing.T) {
 		},
 	}
 
-	customTimeout := 6 * time.Second
 	d := NewWithDeps(Config{
 		Name:            "testapp",
 		DataDir:         dataDir,
-		ShutdownTimeout: customTimeout,
+		ShutdownTimeout: 6 * time.Second,
 		Timeout:         100 * time.Millisecond,
 		HealthPath:      "/health",
 	}, pids, hookProcs, &mockHealthChecker{})
@@ -1145,10 +1144,10 @@ func TestShutdownTimeout_UsedInStop(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// Kill grace should be ShutdownTimeout/2 = 3s, not hardcoded 5s.
-	expected := customTimeout / 2
-	if capturedGrace != expected {
-		t.Errorf("KillProcess grace = %v, want %v (ShutdownTimeout/2)", capturedGrace, expected)
+	// Kill grace is a fixed 3s (K2 fix), not ShutdownTimeout/2.
+	const expectedKillGrace = 3 * time.Second
+	if capturedGrace != expectedKillGrace {
+		t.Errorf("KillProcess grace = %v, want %v (fixed kill grace)", capturedGrace, expectedKillGrace)
 	}
 }
 
