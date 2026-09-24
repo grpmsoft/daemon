@@ -220,7 +220,7 @@ Set `Config.DisableTokenAuth = true` to skip token auth for the application hand
 | `IdleTimeout` | `time.Duration` | `0` (disabled) | Auto-shutdown after this duration with zero connections |
 | `DisableTokenAuth` | `bool` | `false` | Skip bearer token auth for the application handler |
 | `SpawnCooldown` | `time.Duration` | `5s` | Cooldown after spawn failure; `-1` to disable |
-| `ShutdownTimeout` | `time.Duration` | `10s` | Total time budget for graceful shutdown phases |
+| `ShutdownTimeout` | `time.Duration` | `10s` | Daemon graceful drain budget; `Stop()` worst case is `ShutdownTimeout + 7s` |
 
 Config is normalized at construction time (`New()`). Set `Binary` and `Args` once; all lifecycle methods use them automatically.
 
