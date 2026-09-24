@@ -19,14 +19,20 @@ const (
 	createNoWindow        = 0x08000000
 )
 
-// StartDetached spawns a background process that survives the parent exiting.
+// StartProcess spawns a background process that survives the parent exiting.
 // stdout/stderr are redirected to logFile. The child process is fully detached.
-func StartDetached(binary string, args []string, logFile string, env []string) (int, error) {
+// ctx is accepted for future use (e.g., start timeout); currently unused.
+// extraFiles is ignored on Windows (Go issue #26182).
+func StartProcess(_ context.Context, binary string, args []string, dir string, env []string, logFile string, _ []*os.File) (int, error) {
 	cmd := exec.Command(binary, args...) //nolint:gosec // binary is the daemon's own executable path
 
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		CreationFlags: createNewProcessGroup | detachedProcess | createNoWindow,
 		HideWindow:    true,
+	}
+
+	if dir != "" {
+		cmd.Dir = dir
 	}
 
 	if len(env) > 0 {
@@ -45,7 +51,7 @@ func StartDetached(binary string, args []string, logFile string, env []string) (
 	}
 
 	if err := cmd.Start(); err != nil {
-		return 0, fmt.Errorf("start detached process: %w", err)
+		return 0, fmt.Errorf("start process: %w", err)
 	}
 
 	pid := cmd.Process.Pid

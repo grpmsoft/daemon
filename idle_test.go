@@ -8,9 +8,9 @@ import (
 	"time"
 )
 
-// TestServe_ConnectDisconnectEndpoints verifies that the /daemon/connect and
-// /daemon/disconnect HTTP endpoints respond with 204 No Content.
-func TestServe_ConnectDisconnectEndpoints(t *testing.T) {
+// TestServe_ConnectDisconnectEndpointsRemoved verifies that the removed
+// /daemon/connect and /daemon/disconnect endpoints no longer return 204.
+func TestServe_ConnectDisconnectEndpointsRemoved(t *testing.T) {
 	dir := t.TempDir()
 	cfg := Config{
 		Name:    "idle-endpoint-test",
@@ -43,37 +43,26 @@ func TestServe_ConnectDisconnectEndpoints(t *testing.T) {
 
 	client := &http.Client{Timeout: 5 * time.Second}
 
-	// Read the token from PID file — required for /daemon/* endpoints since v0.3.1.
+	// Read the token from PID file.
 	data, err := store.Load()
 	if err != nil {
 		t.Fatalf("load PID info: %v", err)
 	}
 	token := data.Token
 
-	// POST /daemon/connect must return 204.
-	connectURL := fmt.Sprintf("http://127.0.0.1:%d/daemon/connect", port)
-	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, connectURL, nil)
-	req.Header.Set("Authorization", "Bearer "+token)
-	resp, err := client.Do(req)
-	if err != nil {
-		t.Fatalf("POST /daemon/connect: %v", err)
-	}
-	_ = resp.Body.Close()
-	if resp.StatusCode != http.StatusNoContent {
-		t.Errorf("POST /daemon/connect: got %d, want %d", resp.StatusCode, http.StatusNoContent)
-	}
-
-	// POST /daemon/disconnect must return 204.
-	disconnectURL := fmt.Sprintf("http://127.0.0.1:%d/daemon/disconnect", port)
-	req, _ = http.NewRequestWithContext(ctx, http.MethodPost, disconnectURL, nil)
-	req.Header.Set("Authorization", "Bearer "+token)
-	resp, err = client.Do(req)
-	if err != nil {
-		t.Fatalf("POST /daemon/disconnect: %v", err)
-	}
-	_ = resp.Body.Close()
-	if resp.StatusCode != http.StatusNoContent {
-		t.Errorf("POST /daemon/disconnect: got %d, want %d", resp.StatusCode, http.StatusNoContent)
+	// POST /daemon/connect must NOT return 204 (endpoint removed in v0.4.0).
+	for _, path := range []string{"/daemon/connect", "/daemon/disconnect"} {
+		url := fmt.Sprintf("http://127.0.0.1:%d%s", port, path)
+		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		resp, reqErr := client.Do(req)
+		if reqErr != nil {
+			t.Fatalf("POST %s: %v", path, reqErr)
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode == http.StatusNoContent {
+			t.Errorf("POST %s: got 204, endpoint must be removed", path)
+		}
 	}
 
 	cancel()
@@ -120,7 +109,6 @@ func TestServe_IdleAutoShutdown(t *testing.T) {
 		t.Fatal("PID file must be written within 5 seconds")
 	}
 
-	client := &http.Client{Timeout: 5 * time.Second}
 	base := fmt.Sprintf("http://127.0.0.1:%d", port)
 
 	// Read the token from PID file.
@@ -130,22 +118,25 @@ func TestServe_IdleAutoShutdown(t *testing.T) {
 	}
 	token := data.Token
 
-	// Connect, then disconnect to trigger idle countdown.
-	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, base+"/daemon/connect", nil)
+	// Attach via lease, then disconnect to trigger idle countdown.
+	attachCtx, attachCancel := context.WithCancel(ctx)
+	req, _ := http.NewRequestWithContext(attachCtx, http.MethodGet, base+"/daemon/attach", nil)
 	req.Header.Set("Authorization", "Bearer "+token)
-	resp, err := client.Do(req)
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		t.Fatalf("POST /daemon/connect: %v", err)
+		t.Fatalf("GET /daemon/attach: %v", err)
 	}
-	_ = resp.Body.Close()
-
-	req, _ = http.NewRequestWithContext(ctx, http.MethodPost, base+"/daemon/disconnect", nil)
-	req.Header.Set("Authorization", "Bearer "+token)
-	resp, err = client.Do(req)
-	if err != nil {
-		t.Fatalf("POST /daemon/disconnect: %v", err)
+	// Read ack byte.
+	ack := make([]byte, 1)
+	if _, err := resp.Body.Read(ack); err != nil {
+		_ = resp.Body.Close()
+		t.Fatalf("read ack: %v", err)
 	}
+	// Disconnect by cancelling the attach context.
+	attachCancel()
 	_ = resp.Body.Close()
+	// Give the server a moment to process the disconnect.
+	time.Sleep(100 * time.Millisecond)
 
 	// Serve should auto-shutdown within IdleTimeout (200ms) + some margin.
 	select {

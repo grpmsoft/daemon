@@ -130,23 +130,26 @@ Proxy process          Daemon
                      graceful shutdown
 ```
 
-Backward compatible: if the daemon predates leases (v0.3.0), the proxy falls back to explicit `POST /daemon/connect` and `POST /daemon/disconnect`.
+### Proxy Limitations
+
+- One request in flight (sequential dispatch, not pipelined)
+- No server-to-client notifications (unidirectional)
+- Not Streamable-HTTP/SSE compatible (plain JSON-RPC POST only)
+- Use direct HTTP connection for concurrent tool calls
 
 ## Security
 
-`Serve()` generates a bearer token (`crypto/rand`) at startup and stores it in the PID file (`0600` permissions). All `/daemon/*` control-plane endpoints require `Authorization: Bearer <token>`. The `/health` endpoint stays open for external probes.
+`Serve()` generates a bearer token (`crypto/rand`) at startup and stores it in the PID file (`0600` permissions). All `/daemon/*` control-plane endpoints require `Authorization: Bearer <token>`. The `/health` endpoint stays open for external probes. The application handler (everything outside `/health` and `/daemon/*`) also requires the token by default (secure by default since v0.4.0).
 
 | Method | Path | Auth | Purpose |
 |--------|------|------|---------|
 | `GET` | `/health` | None | Readiness probe |
-| `GET` | `/daemon/attach` | Bearer | Lease connection (v0.3.1+) |
-| `POST` | `/daemon/connect` | Bearer | Increment connection count. Deprecated: use attach |
-| `POST` | `/daemon/disconnect` | Bearer | Decrement connection count. Deprecated: use attach |
+| `GET` | `/daemon/attach` | Bearer | Lease connection |
 | `POST` | `/daemon/shutdown` | Bearer | Graceful stop |
 
 DNS rebinding protection: `loopbackGuard` middleware rejects requests with non-loopback `Host` or `Origin` headers. Combined with the bearer token, a page with a rebinding domain that passes the Host check still cannot authenticate.
 
-Set `Config.RequireToken = true` to extend token auth to your application handler (everything outside `/health` and `/daemon/*`).
+Set `Config.DisableTokenAuth = true` to skip token auth for the application handler (e.g., for local curl debugging).
 
 ## Configuration
 
@@ -160,7 +163,7 @@ Set `Config.RequireToken = true` to extend token auth to your application handle
 | `Timeout` | `time.Duration` | `30s` | How long `Start()` waits for health check |
 | `HealthPath` | `string` | `"/health"` | HTTP path for the health endpoint |
 | `IdleTimeout` | `time.Duration` | `0` (disabled) | Auto-shutdown after this duration with zero connections |
-| `RequireToken` | `bool` | `false` | Extend bearer token auth to the application handler |
+| `DisableTokenAuth` | `bool` | `false` | Skip bearer token auth for the application handler |
 
 Config is normalized at construction time (`New()`). Set `Binary` and `Args` once; all lifecycle methods use them automatically.
 

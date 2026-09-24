@@ -31,7 +31,11 @@ func TestHelperProcess(t *testing.T) {
 	if os.Getenv("DAEMON_MODE") != "1" {
 		t.Skip("helper process only")
 	}
-	cfg := daemon.Config{Name: itName, DataDir: os.Getenv("DAEMON_DATA_DIR")}
+	cfg := daemon.Config{
+		Name:             itName,
+		DataDir:          os.Getenv("DAEMON_DATA_DIR"),
+		DisableTokenAuth: true, // allow unauthenticated app requests in tests
+	}
 	if v := os.Getenv("IT_IDLE"); v != "" {
 		cfg.IdleTimeout, _ = time.ParseDuration(v)
 	}
@@ -101,8 +105,13 @@ func TestIntegration_StopHonoursDeadline(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Read token — required since v0.4.0 (DisableTokenAuth defaults to false).
+	_, token := readItPIDInfo(t, cfg.DataDir)
 	go func() {
-		_, _ = http.Get(fmt.Sprintf("http://127.0.0.1:%d/slow", port)) //nolint:noctx,gosec // test-only
+		req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet,
+			fmt.Sprintf("http://127.0.0.1:%d/slow", port), nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		_, _ = http.DefaultClient.Do(req) //nolint:bodyclose // test-only, we don't care about the response
 	}()
 	time.Sleep(200 * time.Millisecond)
 

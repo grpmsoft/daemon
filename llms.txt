@@ -57,7 +57,7 @@ Config immutable after New(). Concurrent calls safe.
 ### Interfaces
 
 - PIDStore -- Save, Load, Clear, IsAlive, Path
-- ProcessManager -- StartDetached, KillProcess(ctx, pid, grace), IsProcessAlive
+- ProcessManager -- Start(ctx, StartSpec), KillProcess(ctx, pid, grace), IsProcessAlive
 - HealthChecker -- Check, WaitUntilReady
 
 ### Security

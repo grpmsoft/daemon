@@ -76,7 +76,7 @@ func (m *pidStoreMock) Path() string {
 
 var _ PIDStore = (*pidStoreMock)(nil)
 
-// mockProcessManager controls StartDetached, KillProcess, IsProcessAlive for tests.
+// mockProcessManager controls Start, KillProcess, IsProcessAlive for tests.
 type mockProcessManager struct {
 	startPID       int
 	startErr       error
@@ -86,7 +86,7 @@ type mockProcessManager struct {
 	killCallCount  int
 }
 
-func (m *mockProcessManager) StartDetached(_ string, _ []string, _ string, _ []string) (int, error) {
+func (m *mockProcessManager) Start(_ context.Context, _ StartSpec) (int, error) {
 	m.startCallCount++
 	if m.startErr != nil {
 		return 0, m.startErr
@@ -123,16 +123,16 @@ func (m *mockHealthChecker) WaitUntilReady(_ context.Context, _ int, _ string, _
 
 var _ HealthChecker = (*mockHealthChecker)(nil)
 
-// hookProcessManager wraps a ProcessManager and fires a callback on StartDetached.
+// hookProcessManager wraps a ProcessManager and fires a callback on Start.
 type hookProcessManager struct {
 	inner          *mockProcessManager
 	onStart        func()
 	startCallCount int
 }
 
-func (h *hookProcessManager) StartDetached(binary string, args []string, logFile string, env []string) (int, error) {
+func (h *hookProcessManager) Start(ctx context.Context, spec StartSpec) (int, error) {
 	h.startCallCount++
-	pid, err := h.inner.StartDetached(binary, args, logFile, env)
+	pid, err := h.inner.Start(ctx, spec)
 	if err == nil && h.onStart != nil {
 		h.onStart()
 	}
@@ -1158,8 +1158,8 @@ type hookKillProcessManager struct {
 	onKill func(grace time.Duration)
 }
 
-func (h *hookKillProcessManager) StartDetached(binary string, args []string, logFile string, env []string) (int, error) {
-	return h.inner.StartDetached(binary, args, logFile, env)
+func (h *hookKillProcessManager) Start(ctx context.Context, spec StartSpec) (int, error) {
+	return h.inner.Start(ctx, spec)
 }
 
 func (h *hookKillProcessManager) KillProcess(ctx context.Context, pid int, grace time.Duration) error {

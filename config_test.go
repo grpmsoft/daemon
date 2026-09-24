@@ -100,6 +100,8 @@ func TestConfig_Validate(t *testing.T) {
 		{"dotdot name", Config{Name: "..", DataDir: "/tmp"}, true},
 		{"empty datadir", Config{Name: "app", DataDir: ""}, true},
 		{"healthpath root", Config{Name: "app", DataDir: "/tmp", HealthPath: "/"}, true},
+		{"healthpath daemon prefix", Config{Name: "app", DataDir: "/tmp", HealthPath: "/daemon/health"}, true},
+		{"healthpath daemon slash", Config{Name: "app", DataDir: "/tmp", HealthPath: "/daemon/"}, true},
 		{"healthpath custom", Config{Name: "app", DataDir: "/tmp", HealthPath: "/ready"}, false},
 	}
 	for _, tt := range tests {

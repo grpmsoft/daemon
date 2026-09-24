@@ -11,13 +11,18 @@ import (
 	"time"
 )
 
-// StartDetached spawns a background process in a new session (setsid).
+// StartProcess spawns a background process in a new session (setsid).
 // stdout/stderr are redirected to logFile. The child survives the parent exiting.
-func StartDetached(binary string, args []string, logFile string, env []string) (int, error) {
+// ctx is accepted for future use (e.g., start timeout); currently unused.
+func StartProcess(_ context.Context, binary string, args []string, dir string, env []string, logFile string, extraFiles []*os.File) (int, error) {
 	cmd := exec.Command(binary, args...) //nolint:gosec // binary path comes from verified caller (Daemon.Start)
 
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Setsid: true,
+	}
+
+	if dir != "" {
+		cmd.Dir = dir
 	}
 
 	if len(env) > 0 {
@@ -34,8 +39,12 @@ func StartDetached(binary string, args []string, logFile string, env []string) (
 		defer func() { _ = f.Close() }()
 	}
 
+	if len(extraFiles) > 0 {
+		cmd.ExtraFiles = extraFiles
+	}
+
 	if err := cmd.Start(); err != nil {
-		return 0, fmt.Errorf("start detached process: %w", err)
+		return 0, fmt.Errorf("start process: %w", err)
 	}
 
 	pid := cmd.Process.Pid

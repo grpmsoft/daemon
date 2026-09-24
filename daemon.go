@@ -31,7 +31,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strconv"
@@ -277,34 +276,22 @@ func (d *Daemon) startWithLock(ctx context.Context, lock *pidlock.Lock) (int, er
 
 	logFile := filepath.Join(d.cfg.DataDir, d.cfg.Name+".log")
 
-	var logF *os.File
-	if logFile != "" {
-		var err error
-		logF, err = os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600) //nolint:gosec // trusted path
-		if err != nil {
-			return 0, fmt.Errorf("open log file %s: %w", logFile, err)
-		}
-		defer func() { _ = logF.Close() }()
+	spec := StartSpec{
+		Binary:  d.cfg.Binary,
+		Args:    d.cfg.Args,
+		Dir:     d.cfg.Dir,
+		LogFile: logFile,
+		Env: []string{
+			"DAEMON_MODE=1",
+			fmt.Sprintf("DAEMON_DATA_DIR=%s", d.cfg.DataDir),
+		},
 	}
+	populateExtraFiles(&spec, lock)
 
-	cmd := exec.Command(d.cfg.Binary, d.cfg.Args...) //nolint:gosec // binary from trusted caller
-	cmd.Dir = d.cfg.Dir
-	cmd.Stdout = logF
-	cmd.Stderr = logF
-	cmd.SysProcAttr = detachedProcAttr()
-	cmd.Env = append(os.Environ(),
-		"DAEMON_MODE=1",
-		fmt.Sprintf("DAEMON_DATA_DIR=%s", d.cfg.DataDir),
-	)
-	setupExtraFiles(cmd, lock)
-
-	if err := cmd.Start(); err != nil {
-		return 0, fmt.Errorf("start daemon %s: %w", d.cfg.Name, err)
+	pid, startErr := d.procs.Start(ctx, spec)
+	if startErr != nil {
+		return 0, fmt.Errorf("start daemon %s: %w", d.cfg.Name, startErr)
 	}
-
-	pid := cmd.Process.Pid
-	// Reaper goroutine prevents zombie (Unix). Windows has no zombies.
-	go func() { _ = cmd.Wait() }()
 
 	killGrace := d.cfg.ShutdownTimeout / 2
 	if err := d.waitForPIDFile(ctx, pid); err != nil {
@@ -568,7 +555,7 @@ func Serve(ctx context.Context, cfg Config, handler http.Handler) error {
 
 	mux := buildDaemonMux(cfg, ct, shutdownCh, handler, startTime)
 	server := &http.Server{
-		Handler:           loopbackGuard(authGuard(mux, token, cfg.RequireToken, cfg.HealthPath), port),
+		Handler:           loopbackGuard(authGuard(mux, token, !cfg.DisableTokenAuth, cfg.HealthPath), port),
 		ReadHeaderTimeout: 10 * time.Second,
 		// BaseContext derives each request's context from serveCtx.
 		// serveCancel is called in the HTTP server's interrupt before Shutdown,
@@ -681,23 +668,10 @@ func waitForLockRelease(ctx context.Context, pids PIDStore, timeout time.Duratio
 	}
 }
 
-// buildDaemonMux creates the HTTP mux with health, connect/disconnect, attach, shutdown endpoints.
+// buildDaemonMux creates the HTTP mux with health, attach, and shutdown endpoints.
 func buildDaemonMux(cfg Config, ct *ConnTracker, shutdownCh chan struct{}, handler http.Handler, startTime time.Time) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.Handle(cfg.HealthPath, defaultHealthHandler(cfg.Name, startTime))
-
-	// Deprecated: use /daemon/attach. Kept for backward compatibility with v0.3.0 proxies.
-	mux.HandleFunc("POST /daemon/connect", func(w http.ResponseWriter, r *http.Request) {
-		ct.Connect()
-		fmt.Fprintf(os.Stderr, "[daemon] agent connected (active: %d, remote: %s)\n", ct.Active(), r.RemoteAddr)
-		w.WriteHeader(http.StatusNoContent)
-	})
-	// Deprecated: use /daemon/attach. Kept for backward compatibility with v0.3.0 proxies.
-	mux.HandleFunc("POST /daemon/disconnect", func(w http.ResponseWriter, r *http.Request) {
-		ct.Disconnect()
-		fmt.Fprintf(os.Stderr, "[daemon] agent disconnected (active: %d, remote: %s)\n", ct.Active(), r.RemoteAddr)
-		w.WriteHeader(http.StatusNoContent)
-	})
 
 	// Lease-based connection tracking. The TCP connection IS the lease: when the
 	// client process dies, the kernel closes the socket, r.Context() is cancelled,

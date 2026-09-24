@@ -50,11 +50,11 @@ daemon.go           -- Daemon struct: Start/Stop/Restart/EnsureRunning/Status,
                        acquireStartupLock, startLocked, stopLocked, buildInfo,
                        Serve (server mode), ConnTracker, waitForIdle,
                        /daemon/attach (lease), authGuard, loopbackGuard
-config.go           -- Config, Status (enum), Info, PIDInfo,
+config.go           -- Config, Status (enum), Info, PIDInfo, StartSpec,
                        PIDStore/ProcessManager/HealthChecker interfaces
 group.go            -- Group: concurrent actor orchestration (oklog/run, zero deps)
-proxy.go            -- Proxy: stdin/stdout ↔ HTTP bridge, proxyAttach (lease
-                       with connect/disconnect fallback), IsHeld pre-check
+proxy.go            -- Proxy: stdin/stdout ↔ HTTP bridge, proxyAttach (lease),
+                       IsHeld pre-check
 ensure.go           -- EnsureRunning (package-level wrapper), waitForPort
 defaults.go         -- Default implementations: pidStoreAdapter,
                        defaultProcessManager, defaultHealthChecker
@@ -65,8 +65,8 @@ internal/
                        WriteData, ReadLocked, IsHeld, InheritFD
   pidfile.go        -- PIDFile: JSON persistence + process verification
   process.go        -- Cross-platform process utilities
-  process_unix.go   -- Unix: StartDetached (setsid), KillProcess (SIGTERM→SIGKILL)
-  process_windows.go -- Windows: StartDetached (CREATE_NEW_PROCESS_GROUP),
+  process_unix.go   -- Unix: StartProcess (setsid), KillProcess (SIGTERM→SIGKILL)
+  process_windows.go -- Windows: StartProcess (CREATE_NEW_PROCESS_GROUP),
                        KillProcess (TerminateProcess→taskkill)
   health.go         -- HTTP health check polling (fixed 500ms interval)
   lock_unix.go      -- LockCtx: ctx-aware flock with LOCK_NB poll loop
@@ -81,7 +81,7 @@ internal/
 
 - **Config** -- Name, DataDir, Binary (default: os.Executable()), Args,
   Dir (default: DataDir, absolute), Timeout (30s), HealthPath ("/health"),
-  IdleTimeout (0=disabled), RequireToken (false). Validated in all public methods.
+  IdleTimeout (0=disabled), DisableTokenAuth (false=secure). Validated in all public methods.
 
 - **Info** -- status snapshot: Status, PID, Port, Name, StartTime, Uptime.
   Returned by Start, EnsureRunning, Restart, Status.
@@ -94,7 +94,7 @@ internal/
 ### Key Interfaces
 
 - **PIDStore** -- Save, Load, Clear, IsAlive, Path. Abstracts PID file persistence.
-- **ProcessManager** -- StartDetached, KillProcess(ctx, pid, grace), IsProcessAlive.
+- **ProcessManager** -- Start(ctx, StartSpec), KillProcess(ctx, pid, grace), IsProcessAlive.
 - **HealthChecker** -- Check, WaitUntilReady.
 
 ### Lock Protocol
@@ -115,12 +115,19 @@ IsRunning()        → NO lock (read-only)
 
 TCP connection lifetime = lease lifetime. Client crash → kernel closes socket →
 count drops → idle shutdown proceeds. No heartbeats, no timers, no stray counts.
-Falls back to connect/disconnect for v0.3.0 daemons.
+
+### Proxy Limitations
+
+- One request in flight (sequential dispatch, not pipelined)
+- No server-to-client notifications (unidirectional)
+- Not Streamable-HTTP/SSE compatible (plain JSON-RPC POST only)
+- Use direct HTTP connection for concurrent tool calls
 
 ### Security
 
-Bearer token (crypto/rand) stored in PID file (0600). Required for /daemon/*.
-/health stays open. DNS rebinding: loopbackGuard + token.
+Bearer token (crypto/rand) stored in PID file (0600). Required for /daemon/*
+and app handler by default (DisableTokenAuth=false). /health stays open.
+DNS rebinding: loopbackGuard + token.
 
 ## Positioning
 
