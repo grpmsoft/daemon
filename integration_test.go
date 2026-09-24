@@ -369,4 +369,48 @@ func TestIntegration_AttachedClientsDoNotBlockStop(t *testing.T) {
 	_ = stdinR.Close()
 }
 
+// K1 regression: EnsureRunning → Stop → EnsureRunning must restart the daemon.
+// Stop alone must NOT prevent restarts (Hold is the opt-in for that).
+// This is the single most important scenario in the library.
+func TestIntegration_K1_StopDoesNotBlockEnsureRunning(t *testing.T) {
+	cfg := itConfig(t)
+	d := daemon.New(cfg)
+
+	// Step 1: start via EnsureRunning.
+	info, err := d.EnsureRunning(context.Background())
+	if err != nil {
+		t.Fatalf("first EnsureRunning: %v", err)
+	}
+	if info.Port == 0 {
+		t.Fatal("first EnsureRunning returned zero port")
+	}
+	if err := dial(info.Port); err != nil {
+		t.Fatalf("first daemon health check: %v", err)
+	}
+
+	// Step 2: stop.
+	if err := d.Stop(context.Background()); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for d.IsRunning() && time.Now().Before(deadline) {
+		time.Sleep(100 * time.Millisecond)
+	}
+	if d.IsRunning() {
+		t.Fatal("daemon did not stop within 10s")
+	}
+
+	// Step 3: EnsureRunning again — must restart, NOT return ErrStopIntent.
+	info2, err := d.EnsureRunning(context.Background())
+	if err != nil {
+		t.Fatalf("second EnsureRunning: %v (ErrStopIntent = K1 regression)", err)
+	}
+	if info2.Port == 0 {
+		t.Fatal("second EnsureRunning returned zero port")
+	}
+	if err := dial(info2.Port); err != nil {
+		t.Fatalf("second daemon health check: %v", err)
+	}
+}
+
 // Test 9: All existing tests pass unchanged — verified by running go test ./...
