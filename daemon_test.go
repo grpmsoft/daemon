@@ -116,7 +116,7 @@ func (m *mockHealthChecker) Check(_ int, _ string) error {
 	return m.checkErr
 }
 
-func (m *mockHealthChecker) WaitUntilReady(_ int, _ string, _ time.Duration) error {
+func (m *mockHealthChecker) WaitUntilReady(_ context.Context, _ int, _ string, _ time.Duration) error {
 	m.waitCallCount++
 	return m.waitErr
 }
@@ -1104,6 +1104,142 @@ func TestDaemon_BuildInfo_ZeroStartTime_ZeroUptime(t *testing.T) {
 
 	if info.Uptime != 0 {
 		t.Errorf("zero StartTime must produce zero Uptime, got %v", info.Uptime)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Tests: ShutdownTimeout
+// ---------------------------------------------------------------------------
+
+// TestShutdownTimeout_UsedInStop verifies that stopLocked passes configured
+// ShutdownTimeout fractions to KillProcess instead of hardcoded 5s.
+func TestShutdownTimeout_UsedInStop(t *testing.T) {
+	dataDir := t.TempDir()
+
+	var capturedGrace time.Duration
+	pids := &pidStoreMock{
+		saved:       &PIDInfo{PID: 555, Port: 0}, // Port=0 skips HTTP shutdown
+		aliveResult: true,
+		pathResult:  filepath.Join(dataDir, "testapp.pid"),
+	}
+	procs := &mockProcessManager{aliveResult: true}
+	// Intercept KillProcess to capture the grace duration.
+	hookProcs := &hookKillProcessManager{
+		inner: procs,
+		onKill: func(grace time.Duration) {
+			capturedGrace = grace
+		},
+	}
+
+	customTimeout := 6 * time.Second
+	d := NewWithDeps(Config{
+		Name:            "testapp",
+		DataDir:         dataDir,
+		ShutdownTimeout: customTimeout,
+		Timeout:         100 * time.Millisecond,
+		HealthPath:      "/health",
+	}, pids, hookProcs, &mockHealthChecker{})
+
+	err := d.Stop(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Kill grace should be ShutdownTimeout/2 = 3s, not hardcoded 5s.
+	expected := customTimeout / 2
+	if capturedGrace != expected {
+		t.Errorf("KillProcess grace = %v, want %v (ShutdownTimeout/2)", capturedGrace, expected)
+	}
+}
+
+// hookKillProcessManager wraps a ProcessManager and captures KillProcess parameters.
+type hookKillProcessManager struct {
+	inner  *mockProcessManager
+	onKill func(grace time.Duration)
+}
+
+func (h *hookKillProcessManager) StartDetached(binary string, args []string, logFile string, env []string) (int, error) {
+	return h.inner.StartDetached(binary, args, logFile, env)
+}
+
+func (h *hookKillProcessManager) KillProcess(ctx context.Context, pid int, grace time.Duration) error {
+	if h.onKill != nil {
+		h.onKill(grace)
+	}
+	return h.inner.KillProcess(ctx, pid, grace)
+}
+
+func (h *hookKillProcessManager) IsProcessAlive(pid int) bool {
+	return h.inner.IsProcessAlive(pid)
+}
+
+var _ ProcessManager = (*hookKillProcessManager)(nil)
+
+// ---------------------------------------------------------------------------
+// Tests: WaitUntilReady respects context cancellation
+// ---------------------------------------------------------------------------
+
+func TestWaitUntilReady_RespectsContext(t *testing.T) {
+	// Cancel the context before calling WaitUntilReady -- it should return
+	// ctx.Err() promptly instead of polling until timeout.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // pre-cancel
+
+	checker := defaultHealthChecker{}
+	start := time.Now()
+	err := checker.WaitUntilReady(ctx, 1, "/health", 10*time.Second)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected error from cancelled context, got nil")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("error must wrap context.Canceled, got: %v", err)
+	}
+	// Must return quickly, not wait the full 10s timeout.
+	if elapsed > 2*time.Second {
+		t.Errorf("WaitUntilReady took %v with cancelled ctx, expected prompt return", elapsed)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Tests: Restart continues after stop error
+// ---------------------------------------------------------------------------
+
+func TestRestart_ContinuesAfterStopError(t *testing.T) {
+	// When stopLocked returns an error (e.g. kill fails), Restart should
+	// still attempt startLocked. The error from startLocked (non-existent
+	// binary) proves it reached the start phase.
+	dataDir := t.TempDir()
+
+	pids := &pidStoreMock{
+		saved:       &PIDInfo{PID: 999, Port: 7070},
+		aliveResult: true, // alive → stop will attempt kill
+		pathResult:  filepath.Join(dataDir, "testapp.pid"),
+	}
+	procs := &mockProcessManager{
+		aliveResult: true,
+		killErr:     errors.New("kill permission denied"), // stop will fail
+	}
+	health := &mockHealthChecker{}
+
+	d := NewWithDeps(Config{
+		Name:       "testapp",
+		DataDir:    dataDir,
+		Binary:     "/nonexistent/binary",
+		Timeout:    500 * time.Millisecond,
+		HealthPath: "/health",
+	}, pids, procs, health)
+
+	_, err := d.Restart(context.Background())
+
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	// Error must come from the Start phase (exec failure), not from Stop.
+	// This proves Restart continued past the stop failure.
+	if !strings.Contains(err.Error(), "start testapp") {
+		t.Errorf("error must come from Start phase (exec failure), got: %v", err)
 	}
 }
 

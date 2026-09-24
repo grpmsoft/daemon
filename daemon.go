@@ -213,9 +213,10 @@ func (d *Daemon) stopLocked(ctx context.Context) error {
 	}
 
 	// Try graceful shutdown via HTTP first.
+	httpTimeout := d.cfg.ShutdownTimeout / 2
 	if data.Port > 0 {
 		shutdownURL := fmt.Sprintf("http://127.0.0.1:%d/daemon/shutdown", data.Port)
-		reqCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		reqCtx, cancel := context.WithTimeout(ctx, httpTimeout)
 		req, reqErr := http.NewRequestWithContext(reqCtx, http.MethodPost, shutdownURL, nil)
 		if reqErr == nil {
 			// Send bearer token if available (v0.3.1+ daemon requires it).
@@ -227,7 +228,7 @@ func (d *Daemon) stopLocked(ctx context.Context) error {
 			cancel()
 			if doErr == nil {
 				_ = resp.Body.Close()
-				if waitErr := waitForLockRelease(ctx, d.pids, 10*time.Second); waitErr == nil {
+				if waitErr := waitForLockRelease(ctx, d.pids, d.cfg.ShutdownTimeout); waitErr == nil {
 					return nil
 				} else if ctx.Err() != nil {
 					return ctx.Err()
@@ -241,7 +242,8 @@ func (d *Daemon) stopLocked(ctx context.Context) error {
 	}
 
 	// Fallback: force kill.
-	if err := d.procs.KillProcess(ctx, data.PID, 5*time.Second); err != nil {
+	killGrace := d.cfg.ShutdownTimeout / 2
+	if err := d.procs.KillProcess(ctx, data.PID, killGrace); err != nil {
 		return fmt.Errorf("kill daemon %s (pid %d): %w", d.cfg.Name, data.PID, err)
 	}
 
@@ -304,19 +306,20 @@ func (d *Daemon) startWithLock(ctx context.Context, lock *pidlock.Lock) (int, er
 	// Reaper goroutine prevents zombie (Unix). Windows has no zombies.
 	go func() { _ = cmd.Wait() }()
 
+	killGrace := d.cfg.ShutdownTimeout / 2
 	if err := d.waitForPIDFile(ctx, pid); err != nil {
-		_ = d.procs.KillProcess(ctx, pid, 5*time.Second)
+		_ = d.procs.KillProcess(ctx, pid, killGrace)
 		return 0, fmt.Errorf("daemon %s (pid %d) did not become ready, killed: %w", d.cfg.Name, pid, err)
 	}
 
 	data, loadErr := d.pids.Load()
 	if loadErr != nil {
-		_ = d.procs.KillProcess(ctx, pid, 5*time.Second)
+		_ = d.procs.KillProcess(ctx, pid, killGrace)
 		return 0, fmt.Errorf("daemon %s (pid %d) started but pid file unreadable, killed: %w", d.cfg.Name, pid, loadErr)
 	}
 
-	if err := d.health.WaitUntilReady(data.Port, d.cfg.HealthPath, d.cfg.Timeout); err != nil {
-		_ = d.procs.KillProcess(ctx, pid, 5*time.Second)
+	if err := d.health.WaitUntilReady(ctx, data.Port, d.cfg.HealthPath, d.cfg.Timeout); err != nil {
+		_ = d.procs.KillProcess(ctx, pid, killGrace)
 		return 0, fmt.Errorf("daemon %s (pid %d) health check failed, killed: %w", d.cfg.Name, pid, err)
 	}
 

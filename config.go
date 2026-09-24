@@ -86,6 +86,15 @@ type Config struct {
 	// when multiple MCP agents call EnsureRunning after a spawn failure.
 	// Default: 5s. Set to -1 to disable.
 	SpawnCooldown time.Duration `json:"spawnCooldown"`
+
+	// ShutdownTimeout is the total time budget for graceful shutdown.
+	// stopLocked divides this budget across its phases:
+	//   - HTTP shutdown request: ShutdownTimeout / 2
+	//   - Wait for lock release: ShutdownTimeout
+	//   - Kill grace period:     ShutdownTimeout / 2
+	// Also used for kill grace in startWithLock failure cleanup.
+	// Default: 10s.
+	ShutdownTimeout time.Duration `json:"shutdownTimeout,omitempty"`
 }
 
 // Validate checks the configuration for invalid values.
@@ -134,6 +143,9 @@ func (c *Config) applyDefaults() {
 	if c.SpawnCooldown == 0 {
 		c.SpawnCooldown = 5 * time.Second
 	}
+	if c.ShutdownTimeout == 0 {
+		c.ShutdownTimeout = 10 * time.Second
+	}
 }
 
 // Info is the status snapshot returned by Daemon.Status().
@@ -177,5 +189,5 @@ type ProcessManager interface {
 // HealthChecker abstracts daemon readiness verification.
 type HealthChecker interface {
 	Check(port int, healthPath string) error
-	WaitUntilReady(port int, healthPath string, timeout time.Duration) error
+	WaitUntilReady(ctx context.Context, port int, healthPath string, timeout time.Duration) error
 }

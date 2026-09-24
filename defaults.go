@@ -74,8 +74,8 @@ func (defaultHealthChecker) Check(port int, healthPath string) error {
 	return internal.CheckHealth(port, healthPath)
 }
 
-func (defaultHealthChecker) WaitUntilReady(port int, healthPath string, timeout time.Duration) error {
-	return internal.WaitUntilReady(port, healthPath, timeout)
+func (defaultHealthChecker) WaitUntilReady(ctx context.Context, port int, healthPath string, timeout time.Duration) error {
+	return internal.WaitUntilReady(ctx, port, healthPath, timeout)
 }
 
 type healthResponse struct {
