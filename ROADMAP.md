@@ -1,6 +1,6 @@
 # Roadmap
 
-## Current State: v0.4.0
+## Current State: v0.4.1
 
 Cross-platform daemon lifecycle library with unified lock protocol,
 lease-based connection tracking, control-plane bearer token, stop-intent,
@@ -10,7 +10,7 @@ and spawn cooldown.
 
 - Client mode: Start/Stop/Restart/Status — all serialized on startup lock + in-process mutex
 - Server mode: Serve with auto port, inherited-lock PID file, health endpoint, configurable ShutdownTimeout
-- Proxy mode: stdin/stdout ↔ HTTP bridge with IsHeld pre-check
+- Proxy mode: stdin/stdout ↔ HTTP bridge with IsHeld pre-check; follows a replaced daemon (lease re-attach, one retry only for undelivered requests, JSON-RPC error otherwise)
 - EnsureRunning: method on *Daemon + package-level wrapper, fully testable
 - Binary/Args in Config — daemon identity per-config, not per-call
 - All mutating methods return *Info (pid, port, start time)
