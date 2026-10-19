@@ -8,6 +8,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json/v2"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -16,6 +17,7 @@ import (
 	"time"
 
 	"github.com/grpmsoft/daemon"
+	"github.com/grpmsoft/daemon/internal/pidlock"
 )
 
 type proxyClient struct {
@@ -289,4 +291,43 @@ func TestIntegration_ProxyHeldDaemonAnswersErrors(t *testing.T) {
 
 	d.Release()
 	c.call(3)
+}
+
+// While its lease is down, the proxy looks for the next daemon without touching
+// the PID lock: on Windows a probe that opens the file for writing (IsHeld)
+// holds it exclusively for a moment, and a daemon starting at that moment
+// fails with "already running", and Status reports a stopped daemon as
+// running from the stale file (both seen on windows-latest CI). A tight
+// TryLock loop must never find the lock taken while no daemon runs.
+func TestIntegration_ProxyWatcherDoesNotTakeThePIDLock(t *testing.T) {
+	cfg := itConfig(t)
+	if _, err := daemon.EnsureRunning(context.Background(), cfg); err != nil {
+		t.Fatal(err)
+	}
+	c := startProxy(t, cfg)
+	c.call(1)
+	if err := daemon.New(cfg).Stop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	pidPath := filepath.Join(cfg.DataDir, itName+".pid")
+	locked, tries := 0, 0
+	for deadline := time.Now().Add(3 * time.Second); time.Now().Before(deadline); tries++ {
+		l, err := pidlock.TryLock(pidPath)
+		if err != nil {
+			if errors.Is(err, pidlock.ErrLocked) {
+				locked++
+				continue
+			}
+			t.Fatalf("TryLock: %v", err)
+		}
+		l.Release()
+	}
+	if locked > 0 {
+		t.Fatalf("PID lock found taken %d times in %d tries while no daemon ran: the watching proxy probes the lock", locked, tries)
+	}
+	if _, err := daemon.New(cfg).Start(context.Background()); err != nil {
+		t.Fatalf("Start while a proxy watches: %v", err)
+	}
+	c.requireRunning()
 }
