@@ -8,6 +8,7 @@ package daemon_test
 import (
 	"bufio"
 	"context"
+	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"errors"
 	"fmt"
@@ -44,11 +45,39 @@ func TestHelperProcess(t *testing.T) {
 		time.Sleep(4 * time.Second) // long in-flight request: graceful shutdown must drain it
 		_, _ = fmt.Fprint(w, "ok")
 	})
+	mux.HandleFunc("POST /mcp", helperMCP(cfg.DataDir))
 	if err := daemon.Serve(context.Background(), cfg, mux); err != nil {
 		fmt.Fprintln(os.Stderr, "helper serve:", err)
 		os.Exit(1)
 	}
 	os.Exit(0)
+}
+
+// helperMCP answers JSON-RPC posted by Proxy with the serving PID, after
+// recording the method in DataDir/exec.log (one line per execution), so a test
+// can tell whether a request ran twice. Method "slow" stays in flight for 10 s.
+// A notification (no id) gets 204, as an MCP server answers it.
+func helperMCP(dataDir string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var req struct {
+			ID     jsontext.Value `json:"id"`
+			Method string         `json:"method"`
+		}
+		_ = json.Unmarshal(body, &req)
+		if f, err := os.OpenFile(filepath.Join(dataDir, "exec.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600); err == nil { //nolint:gosec // test-only file in the test daemon DataDir
+			_, _ = fmt.Fprintln(f, req.Method)
+			_ = f.Close()
+		}
+		if req.Method == "slow" {
+			time.Sleep(10 * time.Second)
+		}
+		if len(req.ID) == 0 {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		_, _ = fmt.Fprintf(w, `{"jsonrpc":"2.0","id":%s,"result":{"pid":%d}}`, req.ID, os.Getpid())
+	}
 }
 
 func itConfig(t *testing.T) daemon.Config {

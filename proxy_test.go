@@ -11,11 +11,15 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/grpmsoft/daemon/internal/pidlock"
 )
 
 // findFreePort finds an available TCP port for tests.
@@ -294,11 +298,11 @@ func TestProxyAttach_NotFoundReturnsNil(t *testing.T) {
 	defer srv.Close()
 
 	plog := log.New(io.Discard, "", 0)
-	cancelFn := proxyAttach(context.Background(), srv.URL, "", plog)
+	lease := proxyAttach(context.Background(), srv.URL, "", plog)
 
-	if cancelFn != nil {
-		t.Error("cancelFn should be nil when attach returns 404")
-		cancelFn()
+	if lease != nil {
+		t.Error("lease should be nil when attach returns 404")
+		lease.cancel()
 	}
 }
 
@@ -322,12 +326,155 @@ func TestProxyAttach_LeaseMode(t *testing.T) {
 	defer srv.Close()
 
 	plog := log.New(io.Discard, "", 0)
-	cancelFn := proxyAttach(context.Background(), srv.URL, "", plog)
+	lease := proxyAttach(context.Background(), srv.URL, "", plog)
 
-	if cancelFn == nil {
-		t.Fatal("cancelFn should be non-nil in lease mode")
+	if lease == nil {
+		t.Fatal("lease should be non-nil in lease mode")
 	}
 
 	// Clean up — cancel the attach context.
-	cancelFn()
+	lease.cancel()
+	<-lease.done // the lease ends once cancelled
+}
+
+// ---------------------------------------------------------------------------
+// Tests: reconnect decisions
+// ---------------------------------------------------------------------------
+
+// A request is retried only when it provably never reached a daemon: the dial
+// failed. Anything after the dial (reset, EOF, timeout while waiting) may have
+// executed it.
+func TestNotDelivered(t *testing.T) {
+	dialErr := &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("connectex: no connection could be made because the target machine actively refused it")}
+	for _, tc := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"dial refused", dialErr, true},
+		{"dial wrapped by net/http", fmt.Errorf("http post: %w", &url.Error{Op: "Post", URL: "http://127.0.0.1:1/mcp", Err: dialErr}), true},
+		{"read reset after sending", &url.Error{Op: "Post", URL: "u", Err: &net.OpError{Op: "read", Net: "tcp", Err: errors.New("wsarecv: an existing connection was forcibly closed by the remote host")}}, false},
+		{"EOF after sending", &url.Error{Op: "Post", URL: "u", Err: io.EOF}, false},
+		{"unexpected EOF", fmt.Errorf("read response body: %w", io.ErrUnexpectedEOF), false},
+		{"context canceled", &url.Error{Op: "Post", URL: "u", Err: context.Canceled}, false},
+		{"nil", nil, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := notDelivered(tc.err); got != tc.want {
+				t.Errorf("notDelivered(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
+}
+
+// A failed request is answered with a JSON-RPC error carrying its id verbatim
+// (number or string); a notification (no id) and unparsable input get none.
+func TestErrorReply(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		line string
+		want string // "" = no reply
+	}{
+		{"numeric id", `{"jsonrpc":"2.0","id":7,"method":"tools/call"}`, `{"jsonrpc":"2.0","id":7,"error":{"code":-32603,"message":"daemon unavailable: boom"}}`},
+		{"string id", `{"jsonrpc":"2.0","id":"a-1","method":"x"}`, `{"jsonrpc":"2.0","id":"a-1","error":{"code":-32603,"message":"daemon unavailable: boom"}}`},
+		{"notification", `{"jsonrpc":"2.0","method":"notifications/initialized"}`, ""},
+		{"null id", `{"jsonrpc":"2.0","id":null,"method":"x"}`, ""},
+		{"not json", `garbage`, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := errorReply([]byte(tc.line), "boom")
+			if tc.want == "" {
+				if ok {
+					t.Errorf("errorReply(%s) = %s, want no reply", tc.line, got)
+				}
+				return
+			}
+			if !ok || string(got) != tc.want {
+				t.Errorf("errorReply(%s) = %s (%v), want %s", tc.line, got, ok, tc.want)
+			}
+		})
+	}
+}
+
+// A 401 means the request reached a daemon that is not ours (another daemon
+// took the old port; its token differs) and did not run it: the proxy reads the
+// PID file again and sends the request once to the daemon named there. Any
+// other HTTP error came from our daemon and is not retried.
+func TestForward_RetriesOnlyNotDelivered(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		oldStatus int
+		wantNew   int32 // requests the new daemon gets
+		wantErr   bool
+	}{
+		{"401 from a foreign daemon on the old port", http.StatusUnauthorized, 1, false},
+		{"500 from our daemon", http.StatusInternalServerError, 0, true},
+		{"404 from our daemon", http.StatusNotFound, 0, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var oldHits, newHits atomic.Int32
+			oldSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/mcp" {
+					oldHits.Add(1)
+				}
+				http.Error(w, "no", tc.oldStatus)
+			}))
+			defer oldSrv.Close()
+			newSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/mcp" {
+					newHits.Add(1)
+					_, _ = io.WriteString(w, `{"jsonrpc":"2.0","id":1,"result":{}}`)
+					return
+				}
+				http.NotFound(w, r) // no lease on the test server
+			}))
+			defer newSrv.Close()
+
+			dir := t.TempDir()
+			pidPath := filepath.Join(dir, "test.pid")
+			lock, err := pidlock.TryLock(pidPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer lock.Release()
+			data, _ := json.Marshal(PIDInfo{PID: 1, Port: portOf(t, newSrv.URL), Name: "test", Token: "new"})
+			if err := lock.WriteData(data); err != nil {
+				t.Fatal(err)
+			}
+
+			p := &proxySession{
+				cfg:     Config{Name: "test", DataDir: dir, Timeout: time.Second},
+				mcpPath: "/mcp",
+				pidPath: pidPath,
+				plog:    log.New(io.Discard, "", 0),
+				client:  &http.Client{},
+			}
+			p.target = proxyTarget{port: portOf(t, oldSrv.URL), token: "old", base: oldSrv.URL, url: oldSrv.URL + "/mcp"}
+
+			resp, _, err := p.forward(context.Background(), []byte(`{"jsonrpc":"2.0","id":1,"method":"ping"}`))
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("forward error = %v, want error %v (resp %s)", err, tc.wantErr, resp)
+			}
+			if oldHits.Load() != 1 || newHits.Load() != tc.wantNew {
+				t.Errorf("requests: old daemon %d, new daemon %d; want 1 and %d", oldHits.Load(), newHits.Load(), tc.wantNew)
+			}
+		})
+	}
+}
+
+func portOf(t *testing.T, rawURL string) int {
+	t.Helper()
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, port, err := net.SplitHostPort(u.Host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	if _, err := fmt.Sscan(port, &n); err != nil {
+		t.Fatal(err)
+	}
+	return n
 }
