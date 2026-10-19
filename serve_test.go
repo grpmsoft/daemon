@@ -223,7 +223,9 @@ func TestServe_AppliesDefaultsToConfig(t *testing.T) {
 	}
 
 	cancel()
-	<-serveErrCh
+	if err := <-serveErrCh; err != nil {
+		t.Errorf("Serve after cancel = %v, want nil", err)
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -570,7 +572,9 @@ func TestServe_DisableTokenAuth_DefaultRequiresToken(t *testing.T) {
 	}
 
 	cancel()
-	<-errCh
+	if err := <-errCh; err != nil {
+		t.Errorf("Serve after cancel = %v, want nil", err)
+	}
 }
 
 // TestServe_DisableTokenAuth_ExplicitTrue verifies that when DisableTokenAuth
@@ -620,7 +624,9 @@ func TestServe_DisableTokenAuth_ExplicitTrue(t *testing.T) {
 	}
 
 	cancel()
-	<-errCh
+	if err := <-errCh; err != nil {
+		t.Errorf("Serve after cancel = %v, want nil", err)
+	}
 }
 
 // ---------------------------------------------------------------------------

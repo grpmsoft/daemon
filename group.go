@@ -50,7 +50,7 @@ func (g *Group) Run() error {
 	wg.Add(len(g.actors) - 1)
 	for range len(g.actors) - 1 {
 		go func() {
-			<-errCh
+			<-errCh //nolint:errcheck // the first error decides Run's result; the others are only drained
 			wg.Done()
 		}()
 	}
