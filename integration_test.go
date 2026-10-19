@@ -344,8 +344,9 @@ func TestIntegration_ShutdownRequiresToken(t *testing.T) {
 }
 
 // Test 8: Attached clients do not block Stop — proxy attached (in-process Proxy
-// goroutine with its own ctx); Stop(ctx) completes in < 2s; the Proxy goroutine
-// returns after the daemon is gone.
+// goroutine with its own ctx); Stop(ctx) completes in < 2s. The daemon being gone
+// does not end the proxy (it follows a replaced daemon); closing stdin and
+// cancelling its ctx do, with a nil error.
 func TestIntegration_AttachedClientsDoNotBlockStop(t *testing.T) {
 	cfg := itConfig(t)
 
@@ -387,10 +388,12 @@ func TestIntegration_AttachedClientsDoNotBlockStop(t *testing.T) {
 	_ = stdinW.Close()
 	proxyCancel()
 
-	// Proxy goroutine should return after daemon is gone + stdin closed.
+	// Proxy goroutine returns once stdin is closed and its ctx cancelled.
 	select {
-	case <-proxyErrCh:
-		// Expected — proxy returns (either nil or error).
+	case err := <-proxyErrCh:
+		if err != nil {
+			t.Errorf("Proxy after stdin EOF and cancel = %v, want nil", err)
+		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("Proxy goroutine did not return within 5s")
 	}
