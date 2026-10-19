@@ -220,20 +220,23 @@ func (p *proxySession) forward(ctx context.Context, line []byte) ([]byte, int, e
 
 // reconnect finds the daemon for a request: EnsureRunning when the config can
 // start one (it refuses a held daemon with ErrStopIntent), then the PID file.
+// Without EnsureRunning, a daemon counts as running only when it takes the
+// lease (the lock is not probed, see watch).
 func (p *proxySession) reconnect(ctx context.Context) error {
+	ensured := false
 	if p.cfg.Binary != "" {
 		if _, err := New(p.cfg).EnsureRunning(ctx); err != nil {
 			return err
 		}
+		ensured = true
 	}
 	info, err := readPIDInfo(p.pidPath)
 	if err != nil {
 		return err
 	}
-	if !pidlock.IsHeld(p.pidPath) {
+	if !p.retarget(ctx, info) && !ensured {
 		return ErrNotRunning
 	}
-	p.retarget(ctx, info)
 	return nil
 }
 
@@ -291,8 +294,14 @@ func (p *proxySession) watch(ctx context.Context, l *proxyLease) {
 		if replaced {
 			return // a request reconnected meanwhile; its lease has its own watcher
 		}
+		// Only read the PID file (a shared read) and let the lease prove the
+		// daemon alive: pidlock.IsHeld opens the file for writing, which on
+		// Windows holds it exclusively for a moment — a daemon starting then
+		// fails with "already running", and Status reads a stale file as a
+		// running daemon. A stale file names a dead port (attach refused); a
+		// foreign daemon on that port rejects the token (attach 401).
 		info, err := readPIDInfo(p.pidPath)
-		if err != nil || !pidlock.IsHeld(p.pidPath) {
+		if err != nil {
 			continue
 		}
 		if p.retarget(ctx, info) {

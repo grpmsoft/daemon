@@ -426,7 +426,15 @@ func TestForward_RetriesOnlyNotDelivered(t *testing.T) {
 					_, _ = io.WriteString(w, `{"jsonrpc":"2.0","id":1,"result":{}}`)
 					return
 				}
-				http.NotFound(w, r) // no lease on the test server
+				if r.URL.Path == "/daemon/attach" && r.Header.Get("Authorization") == "Bearer new" {
+					// A live daemon takes the lease: that is what proves it alive.
+					w.WriteHeader(http.StatusOK)
+					_, _ = w.Write([]byte{0x00})
+					w.(http.Flusher).Flush()
+					<-r.Context().Done()
+					return
+				}
+				http.NotFound(w, r)
 			}))
 			defer newSrv.Close()
 
@@ -451,7 +459,11 @@ func TestForward_RetriesOnlyNotDelivered(t *testing.T) {
 			}
 			p.target = proxyTarget{port: portOf(t, oldSrv.URL), token: "old", base: oldSrv.URL, url: oldSrv.URL + "/mcp"}
 
-			resp, _, err := p.forward(context.Background(), []byte(`{"jsonrpc":"2.0","id":1,"method":"ping"}`))
+			// The lease is taken under ctx: cancelling it before newSrv.Close
+			// (defers run in reverse) ends the held attach request.
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			resp, _, err := p.forward(ctx, []byte(`{"jsonrpc":"2.0","id":1,"method":"ping"}`))
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("forward error = %v, want error %v (resp %s)", err, tc.wantErr, resp)
 			}
