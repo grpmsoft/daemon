@@ -144,6 +144,17 @@ IsRunning()        -> NO lock (read-only)
 TCP connection lifetime = lease lifetime. Client crash -> kernel closes socket ->
 count drops -> idle shutdown proceeds. No heartbeats, no timers, no stray counts.
 
+### Proxy across daemon restarts
+
+- Lease dropped -> poll the PID file for up to Config.Timeout, re-attach; never
+  start a daemon from the watcher (a stop is a decision).
+- Dial failed or HTTP 401 (foreign daemon on the old port) -> the request never
+  ran: reconnect (EnsureRunning if Config.Binary is set, else PID file), send
+  it once more.
+- Failure after sending -> JSON-RPC error for that id (-32603), never retried;
+  notifications get nothing. Held daemon -> errors until Release.
+- Proxy returns only on ctx done, stdin EOF/error, stdout error.
+
 ### Proxy Limitations
 
 - One request in flight (sequential dispatch, not pipelined)

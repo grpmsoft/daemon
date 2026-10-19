@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **`Proxy` survives a daemon restart.** It read the daemon's port once, so after a restart (a deploy, a crash, an idle shutdown) the next request failed and `Proxy` returned an error: every MCP client had to reconnect by hand. The lease was not re-attached either, so a restarted daemon saw zero agents while clients were still open. Now:
+  - when its lease drops, the proxy looks for a daemon in the PID file for up to `Config.Timeout` and re-attaches; it never starts one there, so `Stop`, `Hold` and the idle timer are not undone by an idle client;
+  - a request whose dial failed, or that a daemon answered with 401 (another daemon on the old port), is sent once more after reconnecting (`EnsureRunning` when `Config.Binary` is set, otherwise the PID file);
+  - a request that failed after it was sent is answered with a JSON-RPC error for its id (`-32603`, "daemon unavailable: …") and never sent again: it may have run. Notifications get no answer;
+  - `Proxy` returns only when its context ends, stdin ends or fails, or stdout fails. It no longer returns on a failed request.
+
 ## [0.4.0] - 2026-09-25
 
 ### Breaking Changes

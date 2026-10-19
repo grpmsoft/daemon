@@ -111,6 +111,17 @@ daemon.Proxy(ctx, cfg, daemon.ProxyOptions{MCPPath: "/mcp"})
 
 The proxy automatically establishes a lease-based connection to the daemon (see below) and forwards newline-delimited JSON between stdin and the daemon's HTTP endpoint.
 
+The daemon may be replaced while a proxy runs (restart, crash, idle shutdown). The proxy follows it, and the client on stdin never has to reconnect:
+
+| What happened | What the proxy does |
+|---|---|
+| Its lease dropped (daemon restarted or exited) | Looks for a daemon in the PID file for up to `Config.Timeout` and re-attaches. It never starts one here: a stop (`Stop`, `Hold`, the idle timer) is a decision an idle client must not undo |
+| A request's dial failed, or a daemon answered 401 (another daemon took the old port) | The request never ran: the proxy reconnects (`EnsureRunning` when `Config.Binary` is set, otherwise the PID file) and sends it **once** more |
+| A request failed after it was sent | It may have run (a tool call may have changed files): the client gets a JSON-RPC error for that id (`-32603`, "daemon unavailable: …") and the request is never sent again. Notifications get no answer |
+| The daemon is held (`Hold`) | Requests get the JSON-RPC error; the proxy keeps running and works again after `Release` |
+
+`Proxy` returns only when its context ends, stdin ends or fails, or stdout fails.
+
 ## Lease-Based Connection Tracking
 
 The lifetime of a TCP connection **is** the lease. When a proxy process dies -- SIGKILL, OOM, closed terminal -- the kernel closes the socket, the daemon sees the disconnect, and the connection count drops. No heartbeats. No timers. No stray counts from crashed clients.
