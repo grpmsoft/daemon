@@ -228,31 +228,21 @@ func (d *Daemon) stopLocked(ctx context.Context) error {
 	// Worst case: ShutdownTimeout + 7s. Correct: daemon actually drains.
 	const httpSignalTimeout = 2 * time.Second
 	if data.Port > 0 {
-		shutdownURL := fmt.Sprintf("http://127.0.0.1:%d/daemon/shutdown", data.Port)
 		reqCtx, cancel := context.WithTimeout(ctx, httpSignalTimeout)
-		req, reqErr := http.NewRequestWithContext(reqCtx, http.MethodPost, shutdownURL, nil)
-		if reqErr == nil {
-			// Send bearer token if available (v0.3.1+ daemon requires it).
-			if data.Token != "" {
-				req.Header.Set("Authorization", "Bearer "+data.Token)
-			}
-			client := &http.Client{}
-			resp, doErr := client.Do(req)
-			cancel()
-			if doErr == nil {
-				_ = resp.Body.Close()
-				// Wait for daemon to drain: ShutdownTimeout (daemon's own drain budget) + 2s margin.
-				waitTimeout := d.cfg.ShutdownTimeout + 2*time.Second
-				if waitErr := waitForLockRelease(ctx, d.pids, waitTimeout); waitErr == nil {
-					return nil
-				} else if ctx.Err() != nil {
-					return ctx.Err()
-				}
+		// The address and the bearer token travel with the client, so the
+		// shutdown request is authenticated the same way as any other.
+		_, doErr := newControlClient(data.Port, data.Token).Post(reqCtx, "/daemon/shutdown")
+		cancel()
+		if doErr == nil {
+			// Wait for daemon to drain: ShutdownTimeout (daemon's own drain budget) + 2s margin.
+			waitTimeout := d.cfg.ShutdownTimeout + 2*time.Second
+			if waitErr := waitForLockRelease(ctx, d.pids, waitTimeout); waitErr == nil {
+				return nil
 			} else if ctx.Err() != nil {
 				return ctx.Err()
 			}
-		} else {
-			cancel()
+		} else if ctx.Err() != nil {
+			return ctx.Err()
 		}
 	}
 
