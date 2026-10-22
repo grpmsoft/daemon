@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.2] - 2026-10-22
+
+### Added
+
+- **`Daemon.ControlClient()` and `ControlClient`** — an authenticated client for the daemon's loopback control plane. It owns the two things every caller repeated: the address and the bearer token from the PID file. `Get(ctx, path)` and `Post(ctx, path)` return the response body; a non-2xx status is an error carrying the status line and a bounded body snippet, so a failed call is reported instead of read as an empty answer. The token stays inside the client and no accessor hands it out. Requests have a 30-second ceiling of their own (a caller's shorter deadline still wins), redirects are not followed — a 3xx is reported as a failed status rather than carrying the token wherever the response points — and a body over 8 MiB is an error instead of a silently truncated one.
+
+### Changed
+
+- **`Stop` sends its shutdown request through `ControlClient`.** The hand-built HTTP call in `stopLocked` and the client now share one implementation of the address, the bearer token and the status check.
+
 ## [0.4.1] - 2026-10-19
 
 ### Fixed
