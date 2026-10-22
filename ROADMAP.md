@@ -1,6 +1,6 @@
 # Roadmap
 
-## Current State: v0.4.1
+## Current State: v0.4.2
 
 Cross-platform daemon lifecycle library with unified lock protocol,
 lease-based connection tracking, control-plane bearer token, stop-intent,

@@ -40,6 +40,12 @@ info, _ = d.Status()              // read-only, no lock
 d.Hold(ctx)                       // stop + write .stop-intent marker
 d.Release()                       // clear marker, allow restarts
 
+// Owner-registered control-plane endpoints (the daemon's own mux),
+// authenticated with the token from the PID file:
+client, _ := d.ControlClient()
+body, _ := client.Get(ctx, "/debug/metrics")
+client.Post(ctx, "/daemon/shutdown")
+
 // Server mode (called by spawned binary).
 daemon.Serve(ctx, cfg, httpHandler)
 
@@ -55,6 +61,8 @@ daemon.go           -- Daemon struct: Start/Stop/Restart/EnsureRunning/Status,
                        buildInfo, Serve (server mode), ConnTracker, waitForIdle,
                        /daemon/attach (lease), authGuard, loopbackGuard,
                        stop-intent and spawn-cooldown marker helpers
+control.go          -- ControlClient: authenticated requests to the loopback
+                       control plane (address and token from the PID file)
 config.go           -- Config, Status (enum), Info, PIDInfo, StartSpec,
                        PIDStore/ProcessManager/HealthChecker interfaces
 group.go            -- Group: concurrent actor orchestration (oklog/run, zero deps)

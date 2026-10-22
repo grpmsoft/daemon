@@ -215,6 +215,16 @@ cfg := daemon.Config{
 
 DNS rebinding protection: `loopbackGuard` middleware rejects requests with non-loopback `Host` or `Origin` headers. Combined with the bearer token, a page with a rebinding domain that passes the Host check still cannot authenticate.
 
+`Daemon.ControlClient()` reads the address and the token from the PID file and sends the header for you (since v0.4.2), so an application that registers its own endpoints on the daemon's mux reaches them without handling the token:
+
+```go
+client, err := d.ControlClient()
+if err != nil {
+    return err
+}
+body, err := client.Get(ctx, "/debug/metrics")
+```
+
 Set `Config.DisableTokenAuth = true` to skip token auth for the application handler (e.g., for local curl debugging).
 
 ## Configuration

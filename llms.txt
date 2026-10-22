@@ -53,6 +53,7 @@ Spawn cooldown: after spawn failure, EnsureRunning returns ErrSpawnCooldown for 
 - Restart(ctx) (*Info, error) -- stop + start, single lock; clears stop-intent
 - Status() (*Info, error) -- read-only, no lock
 - IsRunning() bool -- read-only, no lock
+- ControlClient() (*ControlClient, error) -- authenticated client for the loopback control plane; Get/Post, the token stays inside
 
 Config immutable after New(). Concurrent calls safe (sync.Mutex + file lock).
 
@@ -110,6 +111,7 @@ daemon.go        -- Daemon, Start/Stop/Restart/EnsureRunning/Status/Hold/Release
                    Serve, ConnTracker, /daemon/attach, authGuard, loopbackGuard,
                    stop-intent and spawn-cooldown marker helpers
 config.go        -- Config, Status, Info, PIDInfo, StartSpec, interfaces
+control.go       -- ControlClient: authenticated requests to the control plane
 group.go         -- Group (oklog/run actor pattern, zero deps)
 proxy.go         -- Proxy, proxyAttach (lease), IsHeld pre-check
 ensure.go        -- EnsureRunning (package wrapper), waitForPort
