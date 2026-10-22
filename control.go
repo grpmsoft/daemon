@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 )
 
 // controlBodyLimit bounds a control-plane response body: the endpoints are
@@ -15,6 +16,11 @@ const controlBodyLimit = 8 << 20
 
 // controlErrorSnippet bounds the response body quoted in an error.
 const controlErrorSnippet = 300
+
+// controlRequestTimeout bounds a whole control-plane request even when the
+// caller passes a context without a deadline. A loopback endpoint that does not
+// answer within this window is not going to.
+const controlRequestTimeout = 30 * time.Second
 
 // ControlClient talks to the loopback control plane of a running daemon.
 //
@@ -51,7 +57,16 @@ func newControlClient(port int, token string) *ControlClient {
 	return &ControlClient{
 		baseURL: fmt.Sprintf("http://127.0.0.1:%d", port),
 		token:   token,
-		http:    &http.Client{},
+		http: &http.Client{
+			Timeout: controlRequestTimeout,
+			// The control plane is a loopback endpoint the daemon owns: a
+			// redirect is a misconfiguration, and following one would carry the
+			// bearer token to whatever the response names. The 3xx is returned
+			// to the caller and reported as a failed status.
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		},
 	}
 }
 
@@ -86,9 +101,15 @@ func (c *ControlClient) do(ctx context.Context, method, path string) ([]byte, er
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, controlBodyLimit))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, controlBodyLimit+1))
 	if err != nil {
 		return nil, fmt.Errorf("control client: %s: read the response: %w", path, err)
+	}
+	if len(body) > controlBodyLimit {
+		// Reading one byte past the limit tells an oversized answer apart from a
+		// large one; a silently truncated body would surface as a parse error.
+		return nil, fmt.Errorf("control client: %s: response body exceeds %d bytes",
+			path, controlBodyLimit)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		return nil, fmt.Errorf("control client: %s: %s: %s", path, resp.Status, describeBody(body))

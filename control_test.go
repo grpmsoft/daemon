@@ -108,6 +108,85 @@ func TestControlClient_NonOKStatusIsAnError(t *testing.T) {
 	}
 }
 
+func TestControlClient_PostSendsTheAuthenticatedRequest(t *testing.T) {
+	var gotMethod, gotAuth, gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod, gotAuth, gotPath = r.Method, r.Header.Get("Authorization"), r.URL.Path
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+
+	client, err := controlTestDaemon(controlTestPort(t, srv.URL), "s3cret").ControlClient()
+	if err != nil {
+		t.Fatalf("ControlClient: %v", err)
+	}
+	if _, err := client.Post(controlTestContext(t), "/daemon/shutdown"); err != nil {
+		t.Fatalf("Post: %v", err)
+	}
+	if gotMethod != http.MethodPost || gotAuth != "Bearer s3cret" || gotPath != "/daemon/shutdown" {
+		t.Errorf("request = %s %s auth %q", gotMethod, gotPath, gotAuth)
+	}
+}
+
+// TestControlClient_RedirectIsNotFollowed: a redirect would send the bearer
+// token wherever the response points, so the client must report the 3xx itself.
+func TestControlClient_RedirectIsNotFollowed(t *testing.T) {
+	var followed bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/elsewhere" {
+			followed = true
+			return
+		}
+		http.Redirect(w, r, "/elsewhere", http.StatusFound)
+	}))
+	defer srv.Close()
+
+	client, err := controlTestDaemon(controlTestPort(t, srv.URL), "s3cret").ControlClient()
+	if err != nil {
+		t.Fatalf("ControlClient: %v", err)
+	}
+	_, err = client.Get(controlTestContext(t), "/debug/metrics")
+	if err == nil || !strings.Contains(err.Error(), "302") {
+		t.Fatalf("error = %v, want the 302 status", err)
+	}
+	if followed {
+		t.Error("the client followed the redirect")
+	}
+}
+
+func TestControlClient_OversizedBodyIsAnError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(make([]byte, controlBodyLimit+1))
+	}))
+	defer srv.Close()
+
+	client, err := controlTestDaemon(controlTestPort(t, srv.URL), "s3cret").ControlClient()
+	if err != nil {
+		t.Fatalf("ControlClient: %v", err)
+	}
+	_, err = client.Get(controlTestContext(t), "/debug/metrics")
+	if err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("error = %v, want an oversized-body error", err)
+	}
+}
+
+func TestControlClient_ContextCancellationIsAnError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	}))
+	defer srv.Close()
+
+	client, err := controlTestDaemon(controlTestPort(t, srv.URL), "s3cret").ControlClient()
+	if err != nil {
+		t.Fatalf("ControlClient: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if _, err := client.Get(ctx, "/debug/metrics"); err == nil {
+		t.Fatal("a context deadline must be an error")
+	}
+}
+
 func TestControlClient_NotRunningIsAnError(t *testing.T) {
 	if _, err := controlTestDaemon(0, "").ControlClient(); err == nil {
 		t.Error("a daemon without a port must not produce a client")
