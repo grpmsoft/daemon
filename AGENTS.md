@@ -95,6 +95,7 @@ internal/
   file lock -- concurrent calls safe.
 
 - **Config** -- Name, DataDir, Binary (default: os.Executable()), Args,
+  Env (nil: inherit the caller's environment; set: the daemon's whole environment),
   Dir (default: DataDir, absolute), Timeout (30s), HealthPath ("/health"),
   IdleTimeout (0=disabled), DisableTokenAuth (false=secure),
   SpawnCooldown (5s, -1=disabled), ShutdownTimeout (10s).

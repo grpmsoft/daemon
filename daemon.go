@@ -33,6 +33,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -282,15 +283,19 @@ func (d *Daemon) startWithLock(ctx context.Context, lock *pidlock.Lock) (int, er
 
 	logFile := filepath.Join(d.cfg.DataDir, d.cfg.Name+".log")
 
+	// env is the daemon's whole environment: Config.Env when it is set, the
+	// caller's otherwise. The copy keeps the DAEMON_* entries below out of
+	// the caller's slice.
+	env := slices.Clone(d.cfg.Env)
+	if env == nil {
+		env = os.Environ()
+	}
 	spec := StartSpec{
 		Binary:  d.cfg.Binary,
 		Args:    d.cfg.Args,
 		Dir:     d.cfg.Dir,
 		LogFile: logFile,
-		Env: []string{
-			"DAEMON_MODE=1",
-			fmt.Sprintf("DAEMON_DATA_DIR=%s", d.cfg.DataDir),
-		},
+		Env:     append(env, "DAEMON_MODE=1", fmt.Sprintf("DAEMON_DATA_DIR=%s", d.cfg.DataDir)),
 	}
 	populateExtraFiles(&spec, lock)
 
