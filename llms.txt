@@ -35,6 +35,7 @@ Spawn cooldown: after spawn failure, EnsureRunning returns ErrSpawnCooldown for 
 - DataDir (string, required) -- runtime files directory, resolved to absolute
 - Binary (string, default os.Executable()) -- daemon executable
 - Args ([]string) -- arguments for child process
+- Env ([]string, default nil) -- complete environment of the daemon process; nil inherits the caller's, a non-nil slice is all it gets besides the DAEMON_* startup variables
 - Dir (string, default DataDir) -- child working directory
 - Timeout (time.Duration, default 30s) -- health check wait
 - HealthPath (string, default "/health")
@@ -76,7 +77,7 @@ Config immutable after New(). Concurrent calls safe (sync.Mutex + file lock).
 - Binary (string) -- executable path
 - Args ([]string) -- command-line arguments
 - Dir (string) -- working directory
-- Env ([]string) -- environment variables
+- Env ([]string) -- the child's whole environment (empty: inherit)
 - LogFile (string) -- stderr/stdout log file path
 - ExtraFiles ([]*os.File) -- additional file descriptors (e.g., PID lock fd)
 

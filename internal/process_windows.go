@@ -23,6 +23,7 @@ const (
 // stdout/stderr are redirected to logFile. The child process is fully detached.
 // ctx is accepted for future use (e.g., start timeout); currently unused.
 // extraFiles is ignored on Windows (Go issue #26182).
+// env is the child's whole environment; empty lets it inherit the caller's.
 func StartProcess(_ context.Context, binary string, args []string, dir string, env []string, logFile string, _ []*os.File) (int, error) {
 	cmd := exec.Command(binary, args...) //nolint:gosec // binary is the daemon's own executable path
 
@@ -36,7 +37,7 @@ func StartProcess(_ context.Context, binary string, args []string, dir string, e
 	}
 
 	if len(env) > 0 {
-		cmd.Env = append(os.Environ(), env...)
+		cmd.Env = env
 	}
 
 	if logFile != "" {

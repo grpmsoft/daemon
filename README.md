@@ -191,6 +191,20 @@ _, err = d.EnsureRunning(ctx)  // err == daemon.ErrSpawnCooldown (within 10s)
 
 The cooldown marker is time-based: it expires after `SpawnCooldown` elapses. A successful `Start()` or `Restart()` clears it. Context cancellation skips the cooldown check.
 
+## Child Environment
+
+The daemon inherits the environment of the process that starts it, and `Start` adds `DAEMON_MODE`, `DAEMON_DATA_DIR` and (on Unix) `DAEMON_PIDFD` to hand it its data directory and PID lock. A caller whose environment holds credentials, and that starts a binary it does not control, gives the daemon its whole environment instead:
+
+```go
+d := daemon.New(daemon.Config{
+	Name:    "myapp",
+	DataDir: ".myapp",
+	Env:     []string{"PATH=" + os.Getenv("PATH"), "HOME=" + os.Getenv("HOME")},
+})
+```
+
+`nil` inherits. A non-nil slice, even an empty one, is all the daemon receives besides the `DAEMON_*` variables; they come last, so they win a duplicate key.
+
 ## Shutdown Timeout
 
 `Config.ShutdownTimeout` (default `10s`) is the daemon's graceful drain budget. `Serve()` passes it to `http.Server.Shutdown`. On the client side, `Stop()` sends a shutdown request (fixed 2s timeout), waits `ShutdownTimeout + 2s` for the daemon to release the PID lock, then escalates to kill with a fixed 3s grace. Worst case: `ShutdownTimeout + 7s`.
@@ -235,6 +249,7 @@ Set `Config.DisableTokenAuth = true` to skip token auth for the application hand
 | `DataDir` | `string` | (required) | Directory for runtime files (PID, logs). Resolved to absolute path |
 | `Binary` | `string` | `os.Executable()` | Executable path for the daemon process |
 | `Args` | `[]string` | `nil` | Arguments passed to the child process |
+| `Env` | `[]string` | `nil` (inherit) | Complete environment of the daemon process. A non-nil slice, even an empty one, is all the daemon gets besides the `DAEMON_*` startup variables |
 | `Dir` | `string` | `DataDir` | Working directory for the spawned daemon |
 | `Timeout` | `time.Duration` | `30s` | How long `Start()` waits for health check |
 | `HealthPath` | `string` | `"/health"` | HTTP path for the health endpoint |

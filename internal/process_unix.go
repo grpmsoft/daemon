@@ -13,6 +13,7 @@ import (
 
 // StartProcess spawns a background process in a new session (setsid).
 // stdout/stderr are redirected to logFile. The child survives the parent exiting.
+// env is the child's whole environment; empty lets it inherit the caller's.
 // ctx is accepted for future use (e.g., start timeout); currently unused.
 func StartProcess(_ context.Context, binary string, args []string, dir string, env []string, logFile string, extraFiles []*os.File) (int, error) {
 	cmd := exec.Command(binary, args...) //nolint:gosec // binary path comes from verified caller (Daemon.Start)
@@ -26,7 +27,7 @@ func StartProcess(_ context.Context, binary string, args []string, dir string, e
 	}
 
 	if len(env) > 0 {
-		cmd.Env = append(os.Environ(), env...)
+		cmd.Env = env
 	}
 
 	if logFile != "" {

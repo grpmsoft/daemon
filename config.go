@@ -57,6 +57,15 @@ type Config struct {
 	// Args are the arguments passed to the child process in Start/Restart.
 	Args []string `json:"args"`
 
+	// Env is the environment of the daemon process. nil (the default) lets it
+	// inherit the environment of the process that starts it. A non-nil slice,
+	// even an empty one, is all the daemon receives besides the DAEMON_MODE,
+	// DAEMON_DATA_DIR and DAEMON_PIDFD variables Start adds to hand it its
+	// data directory and PID lock; those come last and win a duplicate key.
+	// A caller whose environment holds credentials, and that starts a binary
+	// it does not control, sets Env to what that binary may see.
+	Env []string `json:"env"`
+
 	// Timeout is how long Start() waits for the health check to pass.
 	// Zero means 30 seconds.
 	Timeout time.Duration `json:"timeout"`
@@ -191,7 +200,7 @@ type StartSpec struct {
 	Binary     string     // executable path
 	Args       []string   // command-line arguments
 	Dir        string     // working directory
-	Env        []string   // environment variables
+	Env        []string   // the child's whole environment (empty: inherit)
 	LogFile    string     // stderr/stdout log file path
 	ExtraFiles []*os.File // additional file descriptors (e.g., PID lock fd)
 }
